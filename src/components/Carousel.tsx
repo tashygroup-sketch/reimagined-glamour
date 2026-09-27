@@ -62,10 +62,24 @@ function findActiveIndex(track: HTMLElement): number {
   return best;
 }
 
-export function Carousel({ images }: { images: CarouselImage[] }) {
+// autoPlay: ms between slides (used for the ads card). Stops for good once the visitor
+// swipes, and never runs for people who ask their device for reduced motion.
+export function Carousel({ images, autoPlay }: { images: CarouselImage[]; autoPlay?: number }) {
   const trackRef = useRef<HTMLDivElement>(null);
+  const userTookOver = useRef(false);
   const [active, setActive] = useState(0);
   const [measured, setMeasured] = useState<Record<number, number>>({});
+
+  useEffect(() => {
+    if (!autoPlay || images.length < 2) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const id = window.setInterval(() => {
+      const el = trackRef.current;
+      if (!el || userTookOver.current || document.hidden) return;
+      goTo((findActiveIndex(el) + 1) % images.length);
+    }, autoPlay);
+    return () => window.clearInterval(id);
+  }, [autoPlay, images.length]);
 
   function handleScroll() {
     const el = trackRef.current;
@@ -98,6 +112,9 @@ export function Carousel({ images }: { images: CarouselImage[] }) {
       <div
         ref={trackRef}
         onScroll={handleScroll}
+        onPointerDown={() => {
+          userTookOver.current = true;
+        }}
         style={{ aspectRatio: `1 / ${ratio}` }}
         className="scrollbar-none flex snap-x snap-mandatory overflow-x-auto transition-[aspect-ratio] duration-300 ease-out"
       >
@@ -115,7 +132,10 @@ export function Carousel({ images }: { images: CarouselImage[] }) {
             <button
               key={i}
               type="button"
-              onClick={() => goTo(i)}
+              onClick={() => {
+                userTookOver.current = true;
+                goTo(i);
+              }}
               aria-label={`صورة ${i + 1} من ${images.length}`}
               className={`h-1.5 rounded-full transition-all ${
                 i === safeActive ? "w-4 bg-primary" : "w-1.5 bg-primary/30"

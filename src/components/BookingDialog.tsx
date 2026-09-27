@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCart } from "@/lib/cart";
+import { optionsLabel, useCart } from "@/lib/cart";
 import { buildWhatsAppDraft } from "@/lib/whatsapp";
 import { createOrder } from "@/lib/shop.functions";
 
@@ -84,7 +84,13 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
           address: form.address,
           notes: form.notes,
           ...(locationUrl ? { location_url: locationUrl } : {}),
-          items: lines.map((l) => ({ id: l.id, name: l.name, qty: l.qty, price: l.price })),
+          items: lines.map((l) => ({
+            id: l.id,
+            name: l.name,
+            qty: l.qty,
+            price: l.price,
+            ...(l.options?.length ? { options: l.options } : {}),
+          })),
           total,
         },
       });
@@ -195,9 +201,13 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
             {lines.length > 0 && (
               <div className="rounded-2xl bg-secondary/70 p-4 text-sm">
                 {lines.map((l) => (
-                  <div key={l.id} className="flex justify-between py-0.5">
+                  <div key={l.key} className="flex justify-between gap-3 py-0.5">
                     <span>
-                      {l.name} × {l.qty}
+                      {l.name}
+                      {l.options?.length ? (
+                        <span className="text-muted-foreground"> ({optionsLabel(l.options)})</span>
+                      ) : null}{" "}
+                      × {l.qty}
                     </span>
                     <span>{(l.price * l.qty).toFixed(2)} د.ل</span>
                   </div>
