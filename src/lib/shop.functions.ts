@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { imageSize } from "image-size";
 import type { Database } from "@/integrations/supabase/types";
 
-export const WHATSAPP_NUMBER = "218915554139";
+export const WHATSAPP_NUMBER = "218918640785";
 
 export type MenuItem = {
   id: string;
@@ -324,8 +324,7 @@ export type Promotion = { id: string; image_url: string; ratio: number | null; s
 
 export const DEFAULT_HERO = {
   hero_title: "جمالك يبدأ من هنا",
-  hero_subtitle:
-    "مكياج، عناية بالبشرة وعطور مختارة بعناية — كل ما تحتاجينه لتتألقي كل يوم.",
+  hero_subtitle: "مكياج، عناية بالبشرة وعطور مختارة بعناية — كل ما تحتاجينه لتتألقي كل يوم.",
 };
 
 type SettingsRow = {
@@ -441,6 +440,71 @@ export const saveHeroImage = createServerFn({ method: "POST" })
     if (isMissingColumn(error)) {
       throw new Error("يرجى تشغيل تحديث قاعدة البيانات أولاً (من محادثة Lovable)");
     }
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+export type ProductVariable = {
+  id: string;
+  name: string;
+  option_values: string[];
+  sort_order: number;
+};
+
+export const getVariables = createServerFn({ method: "GET" }).handler(async () => {
+  const client = publicClient();
+  const { data, error } = await client
+    .from("product_variables")
+    .select("id,name,option_values,sort_order")
+    .order("sort_order", { ascending: true });
+  if (isMissingColumn(error)) return [] as ProductVariable[];
+  if (error) throw new Error(error.message);
+  return (data ?? []) as unknown as ProductVariable[];
+});
+
+export const saveVariable = createServerFn({ method: "POST" })
+  .inputValidator(
+    (input: {
+      phone: string;
+      variable: { id?: string; name: string; option_values: string[] };
+    }) => {
+      if (!input.variable?.name?.trim()) throw new Error("اسم المتغير مطلوب");
+      return input;
+    },
+  )
+  .handler(async ({ data }) => {
+    const db = await adminClient(data.phone);
+    const option_values = (data.variable.option_values ?? []).map((v) => v.trim()).filter(Boolean);
+    if (option_values.length === 0) throw new Error("أضيفي قيمة واحدة على الأقل");
+
+    const payload: { name: string; option_values: string[]; sort_order?: number } = {
+      name: data.variable.name.trim().slice(0, 60),
+      option_values,
+    };
+
+    if (!data.variable.id) {
+      const { data: last, error: lastError } = await db
+        .from("product_variables")
+        .select("sort_order")
+        .order("sort_order", { ascending: false })
+        .limit(1);
+      if (lastError) throw new Error(lastError.message);
+      payload.sort_order = (last?.[0]?.sort_order ?? -1) + 1;
+    }
+
+    const q = data.variable.id
+      ? db.from("product_variables").update(payload).eq("id", data.variable.id)
+      : db.from("product_variables").insert(payload);
+    const { error } = await q;
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+export const deleteVariable = createServerFn({ method: "POST" })
+  .inputValidator((input: { phone: string; id: string }) => input)
+  .handler(async ({ data }) => {
+    const db = await adminClient(data.phone);
+    const { error } = await db.from("product_variables").delete().eq("id", data.id);
     if (error) throw new Error(error.message);
     return { ok: true };
   });
