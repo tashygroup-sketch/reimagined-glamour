@@ -1,0 +1,254 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 6px);
+  --radius-2xl: calc(var(--radius) + 14px);
+  --radius-3xl: calc(var(--radius) + 24px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-soft: var(--primary-soft);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ink: var(--ink);
+  --font-display: "Amiri", "Playfair Display", serif;
+  --font-body: "Tajawal", system-ui, sans-serif;
+}
+
+:root {
+  --radius: 0.9rem;
+  /* soft blush pink page background, sampled from the reference site */
+  --background: oklch(0.952 0.027 355);
+  --foreground: oklch(0.26 0.01 300);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.26 0.01 300);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.26 0.01 300);
+  /* soft dusty rose, sampled from the reference site (not the logo) */
+  --primary: oklch(0.687 0.133 359);
+  --primary-foreground: oklch(0.99 0.005 60);
+  --primary-soft: oklch(0.93 0.035 359);
+  /* logo charcoal */
+  --ink: oklch(0.32 0.012 300);
+  --secondary: oklch(0.97 0.015 355);
+  --secondary-foreground: oklch(0.32 0.012 300);
+  --muted: oklch(0.965 0.012 350);
+  --muted-foreground: oklch(0.55 0.02 359);
+  --accent: oklch(0.93 0.04 359);
+  --accent-foreground: oklch(0.512 0.142 3);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.99 0.005 60);
+  --border: oklch(0.9 0.025 359);
+  --input: oklch(0.9 0.025 359);
+  --ring: oklch(0.687 0.133 359);
+  --gradient-petal: linear-gradient(160deg, oklch(0.98 0.015 355), oklch(0.93 0.04 359));
+  --gradient-pink: linear-gradient(135deg, oklch(0.72 0.13 359), oklch(0.6 0.145 349));
+  --shadow-soft: 0 18px 50px -24px color-mix(in oklab, var(--primary) 45%, transparent);
+  --shadow-card: 0 10px 40px -20px color-mix(in oklab, var(--ink) 40%, transparent);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+  }
+}
+
+/* ---------- scroll reveal ---------- */
+[data-reveal] {
+  opacity: 0;
+  transition:
+    opacity 900ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 900ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 900ms ease;
+  filter: blur(6px);
+  will-change: opacity, transform;
+}
+[data-reveal="up"] {
+  transform: translateY(38px);
+}
+[data-reveal="zoom"] {
+  transform: scale(0.92);
+}
+[data-reveal="side"] {
+  transform: translateX(40px);
+}
+[data-reveal][data-shown="true"] {
+  opacity: 1;
+  filter: blur(0);
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal] {
+    opacity: 1;
+    filter: none;
+    transform: none;
+    transition: none;
+  }
+}
+
+/* ---------- opening animation ---------- */
+@keyframes seal-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.6) rotate(-14deg);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.04) rotate(2deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+@keyframes halo {
+  0% {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  50% {
+    opacity: 0.55;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+@keyframes letter-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+@keyframes gate-open-left {
+  to {
+    transform: translateX(-100%);
+  }
+}
+@keyframes gate-open-right {
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes fade-out-soft {
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes float-slow {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-14px) rotate(3deg);
+  }
+}
+@keyframes shimmer-line {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+@keyframes cart-bump {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.4);
+  }
+  60% {
+    transform: scale(0.9);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@utility intro-seal {
+  animation: seal-in 1200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@utility intro-halo {
+  animation: halo 2200ms ease-out 600ms infinite;
+}
+@utility intro-text {
+  animation: letter-rise 900ms cubic-bezier(0.22, 1, 0.36, 1) 700ms both;
+}
+@utility intro-gate-left {
+  animation: gate-open-left 800ms cubic-bezier(0.76, 0, 0.24, 1) 2600ms both;
+}
+@utility intro-gate-right {
+  animation: gate-open-right 800ms cubic-bezier(0.76, 0, 0.24, 1) 2600ms both;
+}
+@utility intro-fade-out {
+  animation: fade-out-soft 500ms ease 2500ms both;
+}
+@utility float-slow {
+  animation: float-slow 7s ease-in-out infinite;
+}
+@utility rule-grow {
+  transform-origin: right;
+  animation: shimmer-line 1200ms ease-out both;
+}
+@utility scallop {
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 68%, transparent 69%);
+  mask-image: radial-gradient(circle at 50% 50%, #000 68%, transparent 69%);
+}
+@utility cart-bump {
+  animation: cart-bump 420ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@utility scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}

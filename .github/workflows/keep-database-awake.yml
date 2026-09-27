@@ -1,0 +1,69 @@
+# Keeps the website's database from being paused for inactivity.
+#
+# Free database plans pause a project that gets too few requests over a week, and a paused
+# database only comes back when someone resumes it by hand. This job reads one menu item
+# every 6 hours so there is always activity, even in a week with no visitors.
+#
+# It reads the database address and public key from the .env file in this repository, so
+# it needs no setup and automatically follows the database if you move it (just update .env).
+# If the database stops answering, this job fails and GitHub emails you.
+#
+# The repository must stay PRIVATE: GitHub turns off scheduled jobs in public repositories
+# after 60 days without activity (and the admin code is in the source code).
+
+name: Keep database awake
+
+on:
+  schedule:
+    # Every 6 hours, at 17 minutes past the hour. GitHub delays jobs that start exactly on
+    # the hour, so this avoids :00. Times are UTC.
+    - cron: "17 */6 * * *"
+  # Adds a "Run workflow" button on the Actions tab, to test it any time.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Get the .env file
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .env
+          sparse-checkout-cone-mode: false
+
+      - name: Read one menu item from the database
+        env:
+          # Optional: set repository variables with these names to override .env.
+          OVERRIDE_URL: ${{ vars.SUPABASE_URL }}
+          OVERRIDE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          set -euo pipefail
+
+          read_env() {
+            grep -E "^$1=" .env 2>/dev/null | head -n 1 | cut -d= -f2- | tr -d "\"'\r " || true
+          }
+
+          url="${OVERRIDE_URL:-$(read_env VITE_SUPABASE_URL)}"
+          key="${OVERRIDE_KEY:-$(read_env VITE_SUPABASE_PUBLISHABLE_KEY)}"
+          url="${url%/}"
+
+          if [ -z "$url" ] || [ -z "$key" ]; then
+            echo "::error::Could not find VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env"
+            exit 1
+          fi
+
+          code=$(curl -sS -o response.txt -w '%{http_code}' \
+            --retry 3 --retry-all-errors --retry-delay 10 --max-time 30 \
+            -H "apikey: $key" \
+            "$url/rest/v1/menu_items?select=id&limit=1") || code="000"
+
+          if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+            echo "OK: the database answered (HTTP $code) at $(date -u '+%Y-%m-%d %H:%M UTC')"
+          else
+            echo "::error::The database did not answer normally (HTTP $code). It may be paused. Response: $(head -c 300 response.txt 2>/dev/null)"
+            exit 1
+          fi
