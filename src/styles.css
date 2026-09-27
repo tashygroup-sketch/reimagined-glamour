@@ -32,40 +32,42 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-ink: var(--ink);
-  --font-display: "Amiri", "Playfair Display", serif;
+  --font-display: "Tajawal", system-ui, sans-serif;
   --font-body: "Tajawal", system-ui, sans-serif;
+  /* the giant GLAMOUR wordmark only (Latin, condensed, heavy) */
+  --font-wordmark: "Anton", "Tajawal", "Arial Narrow", sans-serif;
 }
 
 :root {
   --radius: 0.9rem;
-  /* soft blush pink page background, sampled from the reference site */
-  --background: oklch(0.952 0.027 355);
-  --foreground: oklch(0.26 0.01 300);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.26 0.01 300);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.26 0.01 300);
-  /* soft dusty rose, sampled from the reference site (not the logo) */
-  --primary: oklch(0.687 0.133 359);
-  --primary-foreground: oklch(0.99 0.005 60);
-  --primary-soft: oklch(0.93 0.035 359);
-  /* logo charcoal */
-  --ink: oklch(0.32 0.012 300);
-  --secondary: oklch(0.97 0.015 355);
-  --secondary-foreground: oklch(0.32 0.012 300);
-  --muted: oklch(0.965 0.012 350);
-  --muted-foreground: oklch(0.55 0.02 359);
-  --accent: oklch(0.93 0.04 359);
-  --accent-foreground: oklch(0.512 0.142 3);
+  /* brand magenta from the logo (#E1299B), deepened one step so white text on it passes
+     WCAG AA at body sizes */
+  --background: #fffbfd;
+  --foreground: #2b0f24;
+  --card: #ffffff;
+  --card-foreground: #2b0f24;
+  --popover: #ffffff;
+  --popover-foreground: #2b0f24;
+  --primary: #d6208f;
+  --primary-foreground: #ffffff;
+  --primary-soft: #fbe3f0;
+  /* deep plum for text, instead of neutral black */
+  --ink: #2b0f24;
+  --secondary: #fdf0f7;
+  --secondary-foreground: #2b0f24;
+  --muted: #fbeff6;
+  --muted-foreground: #86667a;
+  --accent: #fbe3f0;
+  --accent-foreground: #a3146c;
   --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.99 0.005 60);
-  --border: oklch(0.9 0.025 359);
-  --input: oklch(0.9 0.025 359);
-  --ring: oklch(0.687 0.133 359);
-  --gradient-petal: linear-gradient(160deg, oklch(0.98 0.015 355), oklch(0.93 0.04 359));
-  --gradient-pink: linear-gradient(135deg, oklch(0.72 0.13 359), oklch(0.6 0.145 349));
-  --shadow-soft: 0 18px 50px -24px color-mix(in oklab, var(--primary) 45%, transparent);
-  --shadow-card: 0 10px 40px -20px color-mix(in oklab, var(--ink) 40%, transparent);
+  --destructive-foreground: #ffffff;
+  --border: #f2dce8;
+  --input: #f2dce8;
+  --ring: #d6208f;
+  --gradient-petal: linear-gradient(160deg, #fff6fa, #fbe1ef);
+  --gradient-pink: linear-gradient(135deg, #d92492, #c41b82);
+  --shadow-soft: 0 18px 50px -24px color-mix(in oklab, var(--primary) 55%, transparent);
+  --shadow-card: 0 10px 40px -20px color-mix(in oklab, var(--ink) 35%, transparent);
 }
 
 @layer base {
@@ -88,6 +90,12 @@
   h2,
   h3 {
     font-family: var(--font-display);
+    font-weight: 700;
+  }
+
+  input[type="search"]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
   }
 }
 
