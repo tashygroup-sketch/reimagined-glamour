@@ -3,12 +3,16 @@ import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   getMenu,
+  getCategories,
+  saveCategoryImage,
   saveMenuItem,
   deleteMenuItem,
   uploadMenuImage,
+  type CategoryInfo,
   type MenuItem,
 } from "@/lib/shop.functions";
-import type { CroppedImage } from "./CropDialog";
+import { SQUARE_CROP } from "@/lib/image";
+import { CropDialog, type CroppedImage } from "./CropDialog";
 import { MenuItemForm, type MenuItemDraft } from "./MenuItemForm";
 import { Reveal } from "@/components/Reveal";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -18,17 +22,24 @@ export function MenuPanel({ phone }: { phone: string }) {
   const save = useServerFn(saveMenuItem);
   const remove = useServerFn(deleteMenuItem);
   const upload = useServerFn(uploadMenuImage);
+  const fetchCategories = useServerFn(getCategories);
+  const setCategoryImage = useServerFn(saveCategoryImage);
   const queryClient = useQueryClient();
 
   const [items, setItems] = useState<MenuItem[] | null>(null);
+  const [categoryInfo, setCategoryInfo] = useState<CategoryInfo[]>([]);
+  const [categoryCrop, setCategoryCrop] = useState<{ file: File; name: string } | null>(null);
+  const [categoryBusy, setCategoryBusy] = useState<string | null>(null);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<MenuItem | "new" | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function load() {
     try {
-      const rows = await fetchMenu();
+      const [rows, cats] = await Promise.all([fetchMenu(), fetchCategories()]);
       setItems(rows);
+      setCategoryInfo(cats);
     } catch (err) {
       setError(err instanceof Error ? err.message : "تعذّر تحميل المنيو");
     }
@@ -45,6 +56,43 @@ export function MenuPanel({ phone }: { phone: string }) {
     const inCategory = (items ?? []).filter((i) => i.category === category);
     if (inCategory.length === 0) return 1;
     return Math.max(...inCategory.map((i) => i.sort_order)) + 1;
+  }
+
+  const categoryImage = (name: string) =>
+    categoryInfo.find((c) => c.name === name)?.image_url ?? null;
+
+  // Category photo arrives already cropped square by the crop screen.
+  async function handleCategoryCropped(image: CroppedImage) {
+    const target = categoryCrop?.name;
+    setCategoryCrop(null);
+    if (!target) return;
+    await changeCategoryImage(target, image);
+  }
+
+  async function changeCategoryImage(name: string, image: CroppedImage | null) {
+    setCategoryBusy(name);
+    setCategoryError(null);
+    try {
+      let url: string | null = null;
+      if (image) {
+        const res = await upload({
+          data: {
+            phone,
+            filename: image.filename,
+            contentType: image.contentType,
+            dataBase64: image.base64,
+          },
+        });
+        url = res.url;
+      }
+      await setCategoryImage({ data: { phone, name, image_url: url } });
+      setCategoryInfo(await fetchCategories());
+      queryClient.invalidateQueries({ queryKey: ["categories"] });
+    } catch (err) {
+      setCategoryError(err instanceof Error ? err.message : "تعذّر حفظ صورة التصنيف");
+    } finally {
+      setCategoryBusy(null);
+    }
   }
 
   // The photo arrives already cropped to 960×1280 by the crop screen.
@@ -78,6 +126,10 @@ export function MenuPanel({ phone }: { phone: string }) {
             category: draft.category || "مكياج",
             sort_order: Number(draft.sort_order) || 0,
             stock: draft.stock.trim() === "" ? null : Math.max(0, Math.floor(Number(draft.stock))),
+            variables: draft.variables.map((v) => ({
+              name: v.name,
+              values: v.values.filter((x) => x.label.trim()),
+            })),
           },
         },
       });
@@ -155,9 +207,52 @@ export function MenuPanel({ phone }: { phone: string }) {
         </Reveal>
       )}
 
+      {categoryError && <p className="text-sm text-destructive">{categoryError}</p>}
+
       {categories.map((cat) => (
         <div key={cat} id={`admin-cat-${cat.replace(/\s+/g, "-")}`} className="scroll-mt-24">
-          <h3 className="mb-3 text-lg text-ink">{cat}</h3>
+          <div className="mb-3 flex items-center gap-3">
+            <label className="relative flex h-16 w-16 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border border-dashed border-primary/60 bg-muted text-center text-[10px] leading-4 text-primary">
+              {categoryImage(cat) ? (
+                <img src={categoryImage(cat)!} alt="" className="h-full w-full object-cover" />
+              ) : categoryBusy === cat ? (
+                "..."
+              ) : (
+                "+ صورة القسم"
+              )}
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                disabled={categoryBusy !== null}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) setCategoryCrop({ file, name: cat });
+                }}
+              />
+            </label>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-lg text-ink">{cat}</h3>
+              <p className="text-xs text-muted-foreground">
+                {categoryBusy === cat
+                  ? "جارِ الحفظ..."
+                  : categoryImage(cat)
+                    ? "اضغطي على الصورة لتغييرها"
+                    : "صورة المربع الذي يظهر في الصفحة الرئيسية"}
+              </p>
+            </div>
+            {categoryImage(cat) && (
+              <button
+                type="button"
+                disabled={categoryBusy !== null}
+                onClick={() => changeCategoryImage(cat, null)}
+                className="shrink-0 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                إزالة الصورة
+              </button>
+            )}
+          </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {items
               .filter((item) => item.category === cat)
@@ -207,6 +302,13 @@ export function MenuPanel({ phone }: { phone: string }) {
                       <p className="mt-1 font-bold text-primary">
                         {Number(item.price).toFixed(2)} د.ل
                       </p>
+                      {item.variables.length > 0 && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {item.variables
+                            .map((v) => `${v.name}: ${v.values.map((x) => x.label).join("، ")}`)
+                            .join(" — ")}
+                        </p>
+                      )}
                       <div className="mt-3 flex gap-2">
                         <button
                           onClick={() => setEditing(item)}
@@ -231,6 +333,13 @@ export function MenuPanel({ phone }: { phone: string }) {
       {items.length === 0 && (
         <p className="py-10 text-center text-muted-foreground">لا توجد أصناف بعد</p>
       )}
+
+      <CropDialog
+        file={categoryCrop?.file ?? null}
+        output={SQUARE_CROP}
+        onCancel={() => setCategoryCrop(null)}
+        onDone={handleCategoryCropped}
+      />
 
       <ConfirmDialog
         open={deleteTarget !== null}

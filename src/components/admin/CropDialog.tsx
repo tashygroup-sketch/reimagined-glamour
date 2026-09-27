@@ -1,17 +1,21 @@
 import { useEffect, useState } from "react";
 import Cropper from "react-easy-crop";
-import { CROP_ASPECT, cropToBase64, type CropArea } from "@/lib/image";
+import { CROP_HEIGHT, CROP_WIDTH, cropToBase64, type CropArea } from "@/lib/image";
 
 export type CroppedImage = { base64: string; contentType: string; filename: string };
 
+// Output size decides the shape: 960×1280 (3:4) for product and ad photos by default,
+// or e.g. SQUARE_CROP for category photos.
 export function CropDialog({
   file,
   onCancel,
   onDone,
+  output = { width: CROP_WIDTH, height: CROP_HEIGHT },
 }: {
   file: File | null;
   onCancel: () => void;
   onDone: (image: CroppedImage) => void;
+  output?: { width: number; height: number };
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [crop, setCrop] = useState({ x: 0, y: 0 });
@@ -41,7 +45,13 @@ export function CropDialog({
     setBusy(true);
     setError(null);
     try {
-      const { base64, contentType } = await cropToBase64(file, area);
+      const { base64, contentType } = await cropToBase64(
+        file,
+        area,
+        0.88,
+        output.width,
+        output.height,
+      );
       onDone({ base64, contentType, filename: file.name.replace(/\.[^.]+$/, "") + ".jpg" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "تعذّر قص الصورة");
@@ -61,7 +71,7 @@ export function CropDialog({
           image={src}
           crop={crop}
           zoom={zoom}
-          aspect={CROP_ASPECT}
+          aspect={output.width / output.height}
           maxZoom={4}
           onCropChange={setCrop}
           onZoomChange={setZoom}

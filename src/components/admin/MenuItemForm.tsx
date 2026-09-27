@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { MenuItem } from "@/lib/shop.functions";
+import type { MenuItem, ProductVariant } from "@/lib/shop.functions";
 import { CropDialog, type CroppedImage } from "./CropDialog";
 import { CategorySelect } from "./CategorySelect";
 
@@ -17,7 +17,15 @@ export type MenuItemDraft = {
   extra_image_ratios: number[];
   // "" = not tracked (unlimited)
   stock: string;
+  variables: VariableDraft[];
 };
+
+export type VariableDraft = {
+  name: string;
+  values: { label: string; image_url: string | null }[];
+};
+
+type CropTarget = "main" | "extra" | { variable: number; value: number };
 
 const empty: MenuItemDraft = {
   name: "",
@@ -30,7 +38,32 @@ const empty: MenuItemDraft = {
   extra_images: [],
   extra_image_ratios: [],
   stock: "",
+  variables: [],
 };
+
+function toDraftVariables(variables: ProductVariant[] | undefined): VariableDraft[] {
+  return (variables ?? []).map((v) => ({
+    name: v.name,
+    values: v.values.map((x) => ({ label: x.label, image_url: x.image_url })),
+  }));
+}
+
+// Mirrors the server's rules so mistakes show up before saving.
+function checkVariables(variables: VariableDraft[]): string | null {
+  const names = new Set<string>();
+  for (const v of variables) {
+    const name = v.name.trim();
+    const labels = v.values.map((x) => x.label.trim()).filter(Boolean);
+    if (!name && labels.length === 0) continue;
+    if (!name) return "اكتبي اسم المتغير (مثل: اللون)";
+    if (labels.length === 0) return `أضيفي قيمة واحدة على الأقل للمتغير "${name}"`;
+    if (names.has(name)) return `اسم المتغير "${name}" مكرر`;
+    names.add(name);
+    const dup = labels.find((l, i) => labels.indexOf(l) !== i);
+    if (dup) return `القيمة "${dup}" مكررة في "${name}"`;
+  }
+  return null;
+}
 
 // Phone keyboards set to Arabic type ٠١٢٣٤٥٦٧٨٩ (or ۰۱۲...); convert them to 0-9 and drop
 // anything that isn't a digit.
@@ -72,9 +105,12 @@ export function MenuItemForm({
           extra_images: initial.extra_images ?? [],
           extra_image_ratios: initial.extra_image_ratios ?? [],
           stock: initial.stock === null || initial.stock === undefined ? "" : String(initial.stock),
+          variables: toDraftVariables(initial.variables),
         }
       : empty,
   );
+  const [variablesError, setVariablesError] = useState<string | null>(null);
+  const [uploadingValue, setUploadingValue] = useState<string | null>(null);
   const [addingCategory, setAddingCategory] = useState(categories.length === 0);
   const [newCategoryName, setNewCategoryName] = useState("");
   const [categoryMissing, setCategoryMissing] = useState(false);
@@ -83,9 +119,7 @@ export function MenuItemForm({
   const [uploadingMain, setUploadingMain] = useState(false);
   const [uploadingExtra, setUploadingExtra] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [pendingCrop, setPendingCrop] = useState<{ file: File; target: "main" | "extra" } | null>(
-    null,
-  );
+  const [pendingCrop, setPendingCrop] = useState<{ file: File; target: CropTarget } | null>(null);
 
   // The display order is no longer a field: keep an item's place if it stays in its original
   // category, otherwise put it at the end of the category it's moved into.
@@ -116,7 +150,7 @@ export function MenuItemForm({
     });
   }
 
-  function pickFile(target: "main" | "extra") {
+  function pickFile(target: CropTarget) {
     return (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       e.target.value = "";
@@ -127,6 +161,10 @@ export function MenuItemForm({
   async function handleCropped(image: CroppedImage) {
     const target = pendingCrop?.target ?? "main";
     setPendingCrop(null);
+    if (typeof target === "object") {
+      await uploadValueImage(target, image);
+      return;
+    }
     const setUploading = target === "main" ? setUploadingMain : setUploadingExtra;
     setUploading(true);
     setUploadError(null);
@@ -148,6 +186,38 @@ export function MenuItemForm({
     }
   }
 
+  async function uploadValueImage(
+    target: { variable: number; value: number },
+    image: CroppedImage,
+  ) {
+    const id = `${target.variable}-${target.value}`;
+    setUploadingValue(id);
+    setUploadError(null);
+    try {
+      const { url } = await onUploadImage(image);
+      updateValue(target.variable, target.value, { image_url: url });
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "تعذّر رفع الصورة");
+    } finally {
+      setUploadingValue(null);
+    }
+  }
+
+  function setVariables(update: (vars: VariableDraft[]) => VariableDraft[]) {
+    setVariablesError(null);
+    setDraft((d) => ({ ...d, variables: update(d.variables) }));
+  }
+
+  function updateValue(vi: number, i: number, patch: Partial<VariableDraft["values"][number]>) {
+    setVariables((vars) =>
+      vars.map((v, idx) =>
+        idx !== vi
+          ? v
+          : { ...v, values: v.values.map((x, j) => (j === i ? { ...x, ...patch } : x)) },
+      ),
+    );
+  }
+
   function removeExtraImage(index: number) {
     setDraft((d) => ({
       ...d,
@@ -156,7 +226,7 @@ export function MenuItemForm({
     }));
   }
 
-  const uploading = uploadingMain || uploadingExtra;
+  const uploading = uploadingMain || uploadingExtra || uploadingValue !== null;
   const stockNumber = draft.stock === "" ? null : Number(draft.stock);
 
   return (
@@ -165,6 +235,11 @@ export function MenuItemForm({
         e.preventDefault();
         if (!draft.category) {
           setCategoryMissing(true);
+          return;
+        }
+        const problem = checkVariables(draft.variables);
+        if (problem) {
+          setVariablesError(problem);
           return;
         }
         onSubmit(draft);
@@ -292,6 +367,125 @@ export function MenuItemForm({
           className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
         />
       </label>
+
+      <div className="rounded-2xl border border-border p-4">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-bold text-ink">المتغيرات</span>
+          <button
+            type="button"
+            onClick={() =>
+              setVariables((vars) => [
+                ...vars,
+                { name: "", values: [{ label: "", image_url: null }] },
+              ])
+            }
+            className="rounded-full border border-primary px-3 py-1.5 text-xs font-medium text-primary"
+          >
+            + إضافة متغير
+          </button>
+        </div>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          مثل اللون أو المقاس. إذا أضفتِ متغيرًا، يجب على الزبونة اختيار قيمة منه قبل الطلب.
+        </p>
+
+        {draft.variables.map((v, vi) => (
+          <div key={vi} className="mt-3 rounded-2xl bg-muted/70 p-3">
+            <div className="flex gap-2">
+              <input
+                value={v.name}
+                placeholder="اسم المتغير، مثال: اللون"
+                onChange={(e) =>
+                  setVariables((vars) =>
+                    vars.map((x, idx) => (idx === vi ? { ...x, name: e.target.value } : x)),
+                  )
+                }
+                className="w-full min-w-0 rounded-xl border border-border bg-background px-3 py-2.5 text-sm outline-none focus:border-primary"
+              />
+              <button
+                type="button"
+                onClick={() => setVariables((vars) => vars.filter((_, idx) => idx !== vi))}
+                className="shrink-0 rounded-xl border border-destructive px-3 text-xs text-destructive"
+              >
+                حذف المتغير
+              </button>
+            </div>
+
+            <div className="mt-2 space-y-2">
+              {v.values.map((val, i) => {
+                const busyHere = uploadingValue === `${vi}-${i}`;
+                return (
+                  <div key={i} className="flex items-center gap-2">
+                    <label
+                      className="relative flex h-12 w-12 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-xl border border-dashed border-primary/60 bg-background text-[10px] text-primary"
+                      title="صورة القيمة"
+                    >
+                      {val.image_url ? (
+                        <img src={val.image_url} alt="" className="h-full w-full object-cover" />
+                      ) : busyHere ? (
+                        "..."
+                      ) : (
+                        "+ صورة"
+                      )}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        disabled={uploading}
+                        onChange={pickFile({ variable: vi, value: i })}
+                      />
+                    </label>
+                    <input
+                      value={val.label}
+                      placeholder="القيمة، مثال: أحمر"
+                      onChange={(e) => updateValue(vi, i, { label: e.target.value })}
+                      className="w-full min-w-0 rounded-xl border border-border bg-background px-3 py-2.5 text-sm outline-none focus:border-primary"
+                    />
+                    {val.image_url && (
+                      <button
+                        type="button"
+                        onClick={() => updateValue(vi, i, { image_url: null })}
+                        className="shrink-0 text-[11px] text-muted-foreground underline"
+                      >
+                        إزالة الصورة
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      aria-label="حذف القيمة"
+                      onClick={() =>
+                        setVariables((vars) =>
+                          vars.map((x, idx) =>
+                            idx === vi ? { ...x, values: x.values.filter((_, j) => j !== i) } : x,
+                          ),
+                        )
+                      }
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-destructive"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                setVariables((vars) =>
+                  vars.map((x, idx) =>
+                    idx === vi
+                      ? { ...x, values: [...x.values, { label: "", image_url: null }] }
+                      : x,
+                  ),
+                )
+              }
+              className="mt-2 text-sm font-medium text-primary"
+            >
+              + إضافة قيمة
+            </button>
+          </div>
+        ))}
+        {variablesError && <p className="mt-2 text-sm text-destructive">{variablesError}</p>}
+      </div>
 
       <div>
         {/* main photo first, extra photos beside it, then the add-extra tile */}

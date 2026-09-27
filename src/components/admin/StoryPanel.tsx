@@ -186,7 +186,7 @@ export function StoryPanel({ phone }: { phone: string }) {
       <div className="rounded-3xl bg-card p-5 shadow-[var(--shadow-card)]">
         <h3 className="text-lg text-ink">صورة خلفية الواجهة</h3>
         <p className="mt-1 text-xs text-muted-foreground">
-          تظهر خلف الشعار في أعلى الموقع، معتمة وضبابية قليلاً.
+          تظهر خلف اسم المتجر في أعلى الموقع، بطبقة وردية فوقها ليبقى النص واضحًا.
         </p>
         <div className="relative mt-4 h-40 overflow-hidden rounded-2xl bg-muted">
           {data.hero_image_url ? (
@@ -194,18 +194,15 @@ export function StoryPanel({ phone }: { phone: string }) {
               <img
                 src={data.hero_image_url}
                 alt=""
-                className="absolute inset-0 h-full w-full scale-110 object-cover blur-[3px]"
+                className="absolute inset-0 h-full w-full object-cover"
               />
-              <div className="absolute inset-0 bg-black/55" />
+              <div className="absolute inset-0 bg-primary/80" />
               <p className="absolute inset-0 flex items-center justify-center text-sm text-white">
                 معاينة الخلفية
               </p>
             </>
           ) : (
-            <div
-              className="flex h-full items-center justify-center text-sm text-muted-foreground"
-              style={{ background: "var(--gradient-petal)" }}
-            >
+            <div className="flex h-full items-center justify-center bg-primary text-sm text-primary-foreground">
               لا توجد صورة — تظهر الخلفية الوردية
             </div>
           )}
@@ -242,7 +239,9 @@ export function StoryPanel({ phone }: { phone: string }) {
         className="space-y-3 rounded-3xl bg-card p-5 shadow-[var(--shadow-card)]"
       >
         <label className="block">
-          <span className="mb-1 block text-sm text-muted-foreground">عنوان الواجهة</span>
+          <span className="mb-1 block text-sm text-muted-foreground">
+            السطر الصغير فوق اسم المتجر
+          </span>
           <input
             value={heroForm.hero_title}
             onChange={(e) => setHeroForm((f) => ({ ...f, hero_title: e.target.value }))}
@@ -250,7 +249,7 @@ export function StoryPanel({ phone }: { phone: string }) {
           />
         </label>
         <label className="block">
-          <span className="mb-1 block text-sm text-muted-foreground">النص تحت العنوان</span>
+          <span className="mb-1 block text-sm text-muted-foreground">النص تحت اسم المتجر</span>
           <textarea
             rows={3}
             value={heroForm.hero_subtitle}
@@ -315,7 +314,12 @@ export function StoryPanel({ phone }: { phone: string }) {
 
       <div className="rounded-3xl bg-card p-5 shadow-[var(--shadow-card)]">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-lg text-ink">صور الإعلانات</h3>
+          <div>
+            <h3 className="text-lg text-ink">صور الإعلانات</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              تظهر في البطاقة المائلة أعلى الموقع وتتبدّل تلقائيًا.
+            </p>
+          </div>
           <label className="inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-primary">
             <span className="rounded-full border border-primary px-3 py-1.5">
               {uploading ? "جارِ الرفع..." : "+ إضافة صورة"}
