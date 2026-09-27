@@ -47,20 +47,30 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+// Category squares on the home page.
+export const SQUARE_CROP = { width: 900, height: 900 } as const;
+
 // Cuts `area` (in the photo's own pixels, already rotated upright) out of the file and
-// scales it to exactly CROP_WIDTH × CROP_HEIGHT. "from-image" applies the phone's rotation
-// tag, matching how the cropper displayed the photo, so the area lines up.
-export async function cropToBase64(file: File, area: CropArea, quality = 0.88) {
+// scales it to exactly width × height (default CROP_WIDTH × CROP_HEIGHT). "from-image"
+// applies the phone's rotation tag, matching how the cropper displayed the photo, so the
+// area lines up.
+export async function cropToBase64(
+  file: File,
+  area: CropArea,
+  quality = 0.88,
+  width: number = CROP_WIDTH,
+  height: number = CROP_HEIGHT,
+) {
   const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
   const canvas = document.createElement("canvas");
-  canvas.width = CROP_WIDTH;
-  canvas.height = CROP_HEIGHT;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("تعذّرت معالجة الصورة");
   ctx.imageSmoothingQuality = "high";
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, CROP_WIDTH, CROP_HEIGHT);
-  ctx.drawImage(bitmap, area.x, area.y, area.width, area.height, 0, 0, CROP_WIDTH, CROP_HEIGHT);
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(bitmap, area.x, area.y, area.width, area.height, 0, 0, width, height);
   bitmap.close();
 
   const blob: Blob = await new Promise((resolve, reject) =>

@@ -5,6 +5,73 @@ import type { Database } from "@/integrations/supabase/types";
 
 export const WHATSAPP_NUMBER = "218918640785";
 
+// A product's own options, e.g. { name: "اللون", values: [{ label: "أحمر", image_url }] }.
+// When a product has any, the customer must pick one value from each before ordering.
+export type VariantValue = { label: string; image_url: string | null };
+export type ProductVariant = { name: string; values: VariantValue[] };
+export type OrderOption = { name: string; value: string };
+
+// Reads whatever is stored in menu_items.variables into a clean list (tolerates null, old
+// shapes, empty names/values), so a bad row can never break the storefront.
+export function normalizeVariables(raw: unknown): ProductVariant[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ProductVariant[] = [];
+  for (const v of raw) {
+    const name = typeof v?.name === "string" ? v.name.trim() : "";
+    const values: VariantValue[] = Array.isArray(v?.values)
+      ? v.values
+          .map((x: unknown) => {
+            const val = x as { label?: unknown; image_url?: unknown };
+            return {
+              label: typeof val?.label === "string" ? val.label.trim() : "",
+              image_url:
+                typeof val?.image_url === "string" && val.image_url.trim()
+                  ? val.image_url.trim()
+                  : null,
+            };
+          })
+          .filter((x: VariantValue) => x.label)
+      : [];
+    if (name && values.length > 0) out.push({ name, values });
+  }
+  return out;
+}
+
+// Admin input → what gets stored. Unlike normalizeVariables, this reports mistakes instead of
+// silently dropping them, so the owner knows why a variable didn't save.
+function sanitizeVariables(input: unknown): ProductVariant[] {
+  if (!Array.isArray(input)) return [];
+  const out: ProductVariant[] = [];
+  const names = new Set<string>();
+  for (const v of input.slice(0, 8)) {
+    const name = String(v?.name ?? "")
+      .trim()
+      .slice(0, 40);
+    const labels = new Set<string>();
+    const values: VariantValue[] = [];
+    for (const val of Array.isArray(v?.values) ? v.values.slice(0, 40) : []) {
+      const label = String(val?.label ?? "")
+        .trim()
+        .slice(0, 60);
+      if (!label) continue;
+      if (labels.has(label)) throw new Error(`القيمة "${label}" مكررة في "${name || "المتغير"}"`);
+      labels.add(label);
+      const image =
+        typeof val?.image_url === "string" && val.image_url.trim()
+          ? val.image_url.trim().slice(0, 500)
+          : null;
+      values.push({ label, image_url: image });
+    }
+    if (!name && values.length === 0) continue;
+    if (!name) throw new Error("اكتبي اسم المتغير (مثل: اللون)");
+    if (values.length === 0) throw new Error(`أضيفي قيمة واحدة على الأقل للمتغير "${name}"`);
+    if (names.has(name)) throw new Error(`اسم المتغير "${name}" مكرر`);
+    names.add(name);
+    out.push({ name, values });
+  }
+  return out;
+}
+
 export type MenuItem = {
   id: string;
   name: string;
@@ -19,6 +86,7 @@ export type MenuItem = {
   is_available: boolean;
   // null = stock not tracked (unlimited); 0 = sold out
   stock: number | null;
+  variables: ProductVariant[];
 };
 
 // PostgREST error codes for "that column doesn't exist (yet)". Lets the site keep working in
@@ -60,7 +128,7 @@ export type OrderRow = {
   delivery_date: string | null;
   notes: string | null;
   location_url: string | null;
-  items: { name: string; qty: number; price: number }[];
+  items: { name: string; qty: number; price: number; options?: OrderOption[] }[];
   total: number;
   status: string;
   created_at: string;
@@ -90,6 +158,7 @@ async function adminClient(phone: string) {
 }
 
 const MENU_COLUMN_SETS = [
+  "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock,variables",
   "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock",
   "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available",
   "id,name,description,price,image_url,category,sort_order,is_available",
@@ -104,13 +173,16 @@ export const getMenu = createServerFn({ method: "GET" }).handler(async () => {
       .order("sort_order", { ascending: true });
     if (isMissingColumn(error)) continue;
     if (error) throw new Error(error.message);
-    return ((data ?? []) as unknown as Partial<MenuItem>[]).map((row) => ({
-      ...row,
-      image_ratio: row.image_ratio ?? null,
-      extra_images: row.extra_images ?? [],
-      extra_image_ratios: row.extra_image_ratios ?? [],
-      stock: row.stock ?? null,
-    })) as MenuItem[];
+    return ((data ?? []) as unknown as (Partial<MenuItem> & { variables?: unknown })[]).map(
+      (row) => ({
+        ...row,
+        image_ratio: row.image_ratio ?? null,
+        extra_images: row.extra_images ?? [],
+        extra_image_ratios: row.extra_image_ratios ?? [],
+        stock: row.stock ?? null,
+        variables: normalizeVariables(row.variables),
+      }),
+    ) as MenuItem[];
   }
   throw new Error("تعذّر تحميل المنيو");
 });
@@ -123,7 +195,7 @@ export const createOrder = createServerFn({ method: "POST" })
       address: string;
       notes?: string;
       location_url?: string;
-      items: { id?: string; name: string; qty: number; price: number }[];
+      items: { id?: string; name: string; qty: number; price: number; options?: OrderOption[] }[];
       total: number;
     }) => input,
   )
@@ -148,6 +220,51 @@ export const createOrder = createServerFn({ method: "POST" })
     }
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    // Every product that has variables must arrive with one valid choice per variable. The
+    // site already enforces this before adding to the cart; checking again here means an old
+    // cart (or a variable the owner edited meanwhile) can't slip an incomplete order through.
+    // Runs before stock is deducted, so a refused order never touches stock.
+    const productIds = [...new Set(data.items.map((i) => i.id).filter((id): id is string => !!id))];
+    const cleanItems: {
+      id?: string;
+      name: string;
+      qty: number;
+      price: number;
+      options?: OrderOption[];
+    }[] = data.items.map((i) => ({
+      ...(i.id ? { id: i.id } : {}),
+      name: String(i.name ?? "").slice(0, 160),
+      qty: Math.max(0, Math.floor(Number(i.qty) || 0)),
+      price: Number(i.price) || 0,
+    }));
+    if (productIds.length > 0) {
+      const { data: rows, error: varError } = await supabaseAdmin
+        .from("menu_items")
+        .select("id,name,variables")
+        .in("id", productIds);
+      if (varError && !isMissingColumn(varError)) throw new Error(varError.message);
+      const byId = new Map((rows ?? []).map((r) => [r.id, r]));
+      data.items.forEach((item, idx) => {
+        const row = item.id ? byId.get(item.id) : undefined;
+        if (!row) return;
+        const variables = normalizeVariables(row.variables);
+        if (variables.length === 0) return;
+        const chosen: OrderOption[] = [];
+        for (const v of variables) {
+          const pick = item.options?.find((o) => o.name === v.name);
+          if (!pick || !v.values.some((val) => val.label === pick.value)) {
+            throw new Error(
+              pick
+                ? `الخيار "${pick.value}" لم يعد متوفرًا في "${row.name}"، احذفيه من السلة وأضيفيه من جديد`
+                : `اختاري ${v.name} للمنتج "${row.name}"`,
+            );
+          }
+          chosen.push({ name: v.name, value: pick.value });
+        }
+        cleanItems[idx]!.options = chosen;
+      });
+    }
 
     // Deduct stock first, atomically: if any item doesn't have enough, nothing is deducted
     // and the order is refused before WhatsApp ever opens.
@@ -180,7 +297,7 @@ export const createOrder = createServerFn({ method: "POST" })
       address: address.slice(0, 300),
       notes: data.notes?.trim().slice(0, 600) ?? null,
       location_url: data.location_url?.trim().slice(0, 300) ?? null,
-      items: data.items,
+      items: cleanItems,
       total: data.total ?? 0,
     };
     let result = await supabaseAdmin.from("orders").insert(payload).select("id").single();
@@ -233,6 +350,7 @@ export const saveMenuItem = createServerFn({ method: "POST" })
         sort_order?: number;
         is_available?: boolean;
         stock?: number | null;
+        variables?: ProductVariant[];
       };
     }) => {
       if (!input.item?.name?.trim()) throw new Error("اسم الصنف مطلوب");
@@ -256,25 +374,34 @@ export const saveMenuItem = createServerFn({ method: "POST" })
         data.item.stock === null || data.item.stock === undefined
           ? null
           : Math.max(0, Math.floor(Number(data.item.stock) || 0)),
+      variables: sanitizeVariables(data.item.variables),
     };
-    let q = data.item.id
-      ? db.from("menu_items").update(payload).eq("id", data.item.id)
-      : db.from("menu_items").insert(payload);
-    let { error } = await q;
+    const write = (row: Omit<Partial<typeof payload>, "name"> & { name: string }) =>
+      data.item.id
+        ? db.from("menu_items").update(row).eq("id", data.item.id)
+        : db.from("menu_items").insert(row);
+
+    let { error } = await write(payload);
     if (isMissingColumn(error)) {
-      // Newer columns haven't been migrated onto the live database yet — save the rest
-      // of the item rather than failing the whole save.
-      const {
-        extra_images: _extraImages,
-        extra_image_ratios: _ratios,
-        image_ratio: _ratio,
-        stock: _stock,
-        ...rest
-      } = payload;
-      q = data.item.id
-        ? db.from("menu_items").update(rest).eq("id", data.item.id)
-        : db.from("menu_items").insert(rest);
-      ({ error } = await q);
+      // A newer column hasn't been migrated onto the live database yet. Variables can't be
+      // dropped silently (the owner would think they saved), so ask for the migration.
+      if (payload.variables.length > 0) {
+        throw new Error(
+          "لحفظ المتغيرات شغّلي ملف تحديث قاعدة البيانات الجديد في Supabase (SQL Editor) أولاً",
+        );
+      }
+      const { variables: _variables, ...withoutVariables } = payload;
+      ({ error } = await write(withoutVariables));
+      if (isMissingColumn(error)) {
+        const {
+          extra_images: _extraImages,
+          extra_image_ratios: _ratios,
+          image_ratio: _ratio,
+          stock: _stock,
+          ...rest
+        } = withoutVariables;
+        ({ error } = await write(rest));
+      }
     }
     if (error) throw new Error(error.message);
     return { ok: true };
@@ -438,73 +565,42 @@ export const saveHeroImage = createServerFn({ method: "POST" })
       .from("site_settings")
       .upsert({ id: 1, hero_image_url: data.hero_image_url?.trim() || null });
     if (isMissingColumn(error)) {
-      throw new Error("يرجى تشغيل تحديث قاعدة البيانات أولاً (من محادثة Lovable)");
+      throw new Error("يرجى تشغيل تحديث قاعدة البيانات أولاً (Supabase → SQL Editor)");
     }
     if (error) throw new Error(error.message);
     return { ok: true };
   });
 
-export type ProductVariable = {
-  id: string;
-  name: string;
-  option_values: string[];
-  sort_order: number;
-};
+export type CategoryInfo = { name: string; image_url: string | null; sort_order: number };
 
-export const getVariables = createServerFn({ method: "GET" }).handler(async () => {
+export const getCategories = createServerFn({ method: "GET" }).handler(async () => {
   const client = publicClient();
   const { data, error } = await client
-    .from("product_variables")
-    .select("id,name,option_values,sort_order")
+    .from("categories")
+    .select("name,image_url,sort_order")
     .order("sort_order", { ascending: true });
-  if (isMissingColumn(error)) return [] as ProductVariable[];
+  // Table not created yet (migration not run): the site still works, just without photos.
+  if (isMissingColumn(error)) return [] as CategoryInfo[];
   if (error) throw new Error(error.message);
-  return (data ?? []) as unknown as ProductVariable[];
+  return (data ?? []) as CategoryInfo[];
 });
 
-export const saveVariable = createServerFn({ method: "POST" })
-  .inputValidator(
-    (input: {
-      phone: string;
-      variable: { id?: string; name: string; option_values: string[] };
-    }) => {
-      if (!input.variable?.name?.trim()) throw new Error("اسم المتغير مطلوب");
-      return input;
-    },
-  )
+export const saveCategoryImage = createServerFn({ method: "POST" })
+  .inputValidator((input: { phone: string; name: string; image_url: string | null }) => {
+    if (!input.name?.trim()) throw new Error("اسم التصنيف مطلوب");
+    return input;
+  })
   .handler(async ({ data }) => {
     const db = await adminClient(data.phone);
-    const option_values = (data.variable.option_values ?? []).map((v) => v.trim()).filter(Boolean);
-    if (option_values.length === 0) throw new Error("أضيفي قيمة واحدة على الأقل");
-
-    const payload: { name: string; option_values: string[]; sort_order?: number } = {
-      name: data.variable.name.trim().slice(0, 60),
-      option_values,
-    };
-
-    if (!data.variable.id) {
-      const { data: last, error: lastError } = await db
-        .from("product_variables")
-        .select("sort_order")
-        .order("sort_order", { ascending: false })
-        .limit(1);
-      if (lastError) throw new Error(lastError.message);
-      payload.sort_order = (last?.[0]?.sort_order ?? -1) + 1;
+    const { error } = await db
+      .from("categories")
+      .upsert(
+        { name: data.name.trim().slice(0, 60), image_url: data.image_url?.trim() || null },
+        { onConflict: "name" },
+      );
+    if (isMissingColumn(error)) {
+      throw new Error("شغّلي ملف تحديث قاعدة البيانات الجديد في Supabase (SQL Editor) أولاً");
     }
-
-    const q = data.variable.id
-      ? db.from("product_variables").update(payload).eq("id", data.variable.id)
-      : db.from("product_variables").insert(payload);
-    const { error } = await q;
-    if (error) throw new Error(error.message);
-    return { ok: true };
-  });
-
-export const deleteVariable = createServerFn({ method: "POST" })
-  .inputValidator((input: { phone: string; id: string }) => input)
-  .handler(async ({ data }) => {
-    const db = await adminClient(data.phone);
-    const { error } = await db.from("product_variables").delete().eq("id", data.id);
     if (error) throw new Error(error.message);
     return { ok: true };
   });
@@ -519,7 +615,7 @@ export const saveHeroText = createServerFn({ method: "POST" })
       hero_subtitle: data.hero_subtitle.trim().slice(0, 400) || DEFAULT_HERO.hero_subtitle,
     });
     if (isMissingColumn(error)) {
-      throw new Error("يرجى تشغيل تحديث قاعدة البيانات أولاً (من محادثة Lovable)");
+      throw new Error("يرجى تشغيل تحديث قاعدة البيانات أولاً (Supabase → SQL Editor)");
     }
     if (error) throw new Error(error.message);
     return { ok: true };

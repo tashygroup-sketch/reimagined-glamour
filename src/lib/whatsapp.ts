@@ -1,4 +1,4 @@
-import type { CartLine } from "./cart";
+import { optionsLabel, type CartLine } from "./cart";
 
 export const WHATSAPP_NUMBER = "218918640785";
 
@@ -12,7 +12,12 @@ export type BookingInfo = {
 
 export function buildWhatsAppDraft(info: BookingInfo, lines: CartLine[], total: number) {
   const items = lines.length
-    ? lines.map((l) => `• ${l.name} × ${l.qty} — ${(l.price * l.qty).toFixed(2)} د.ل`).join("\n")
+    ? lines
+        .map((l) => {
+          const opts = optionsLabel(l.options);
+          return `• ${l.name}${opts ? ` (${opts})` : ""} × ${l.qty} — ${(l.price * l.qty).toFixed(2)} د.ل`;
+        })
+        .join("\n")
     : "• لا توجد أصناف محددة (طلب خاص)";
 
   const text = [

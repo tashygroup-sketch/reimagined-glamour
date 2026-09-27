@@ -1,13 +1,36 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-export type CartLine = { id: string; name: string; price: number; qty: number; image_url?: string | null };
+export type CartOption = { name: string; value: string };
+
+// One line per product + chosen options: "روج / اللون: أحمر" and "روج / اللون: نود" are two
+// separate lines with their own quantities. `key` identifies the line; `id` is the product.
+export type CartLine = {
+  key: string;
+  id: string;
+  name: string;
+  price: number;
+  qty: number;
+  image_url?: string | null;
+  options?: CartOption[];
+};
+
+export function lineKey(id: string, options?: CartOption[]) {
+  if (!options || options.length === 0) return id;
+  return `${id}|${options.map((o) => `${o.name}=${o.value}`).join("|")}`;
+}
+
+export function optionsLabel(options?: CartOption[]) {
+  return (options ?? []).map((o) => `${o.name}: ${o.value}`).join("، ");
+}
 
 type CartCtx = {
   lines: CartLine[];
-  add: (line: Omit<CartLine, "qty">) => void;
-  remove: (id: string) => void;
-  setQty: (id: string, qty: number) => void;
+  add: (line: Omit<CartLine, "qty" | "key">, qty?: number) => void;
+  remove: (key: string) => void;
+  setQty: (key: string, qty: number) => void;
   clear: () => void;
+  /** total pieces of one product across all its option lines (for stock limits) */
+  qtyOfProduct: (id: string) => number;
   count: number;
   total: number;
 };
@@ -21,7 +44,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) setLines(JSON.parse(raw));
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<CartLine>[];
+      // Carts saved before options existed have no `key`; rebuild it.
+      setLines(
+        parsed
+          .filter((l) => typeof l.id === "string" && typeof l.qty === "number")
+          .map((l) => ({ ...(l as CartLine), key: l.key ?? lineKey(l.id!, l.options) })),
+      );
     } catch {
       /* ignore */
     }
@@ -42,16 +72,20 @@ export function CartProvider({ children }: { children: ReactNode }) {
       lines,
       count,
       total,
-      add: (line) =>
+      qtyOfProduct: (id) => lines.filter((l) => l.id === id).reduce((s, l) => s + l.qty, 0),
+      add: (line, qty = 1) =>
         setLines((prev) => {
-          const found = prev.find((l) => l.id === line.id);
-          if (found) return prev.map((l) => (l.id === line.id ? { ...l, qty: l.qty + 1 } : l));
-          return [...prev, { ...line, qty: 1 }];
+          const key = lineKey(line.id, line.options);
+          const found = prev.find((l) => l.key === key);
+          if (found) return prev.map((l) => (l.key === key ? { ...l, qty: l.qty + qty } : l));
+          return [...prev, { ...line, key, qty }];
         }),
-      remove: (id) => setLines((prev) => prev.filter((l) => l.id !== id)),
-      setQty: (id, qty) =>
+      remove: (key) => setLines((prev) => prev.filter((l) => l.key !== key)),
+      setQty: (key, qty) =>
         setLines((prev) =>
-          qty <= 0 ? prev.filter((l) => l.id !== id) : prev.map((l) => (l.id === id ? { ...l, qty } : l)),
+          qty <= 0
+            ? prev.filter((l) => l.key !== key)
+            : prev.map((l) => (l.key === key ? { ...l, qty } : l)),
         ),
       clear: () => setLines([]),
     };
