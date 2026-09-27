@@ -22,7 +22,7 @@ Online store for makeup and skincare — built on the same stack as [sara-s-swee
 
 4. **Fill in `.env`** with your new project's URL and public (`sb_publishable_...`) key, from Project Settings → API.
 
-5. **Set your own admin code.** Open `src/lib/admin.server.ts` and change `ADMIN_PHONE_DIGITS` to a private 10-digit code only you know — this is effectively your admin password. The placeholder value shipped here (`5858585858`) is not secret.
+5. **Set your own admin code.** Open `src/lib/admin.server.ts` and change `ADMIN_PHONE_DIGITS` to a private 10-digit code only you know — this is effectively your admin password. Change it again if the current value (`6767676767`) is ever shared outside your team.
 
 6. **Run locally**
    ```sh
@@ -31,7 +31,7 @@ Online store for makeup and skincare — built on the same stack as [sara-s-swee
 
 ## WhatsApp order number
 
-Orders are sent as a pre-filled WhatsApp message to the number set in `src/lib/whatsapp.ts` (`WHATSAPP_NUMBER`), currently `218915554139` (Libya country code + `0915554139` with the leading 0 dropped). Update it there if the store's number changes.
+Orders are sent as a pre-filled WhatsApp message to the number set in `src/lib/whatsapp.ts` (`WHATSAPP_NUMBER`), currently `218918640785` (Libya country code + `0918640785` with the leading 0 dropped). Update it there if the store's number changes.
 
 ## Deployment
 
