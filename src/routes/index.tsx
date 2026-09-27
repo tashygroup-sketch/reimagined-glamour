@@ -122,7 +122,7 @@ function Home() {
               alt="شعار Glamour with Jannat"
               width={48}
               height={48}
-              className="h-11 w-11 object-contain"
+              className="h-11 w-11 rounded-full object-contain"
             />
             <span className="text-lg text-ink">Glamour with Jannat</span>
           </div>
@@ -181,7 +181,7 @@ function Home() {
             alt="Glamour with Jannat"
             width={260}
             height={260}
-            className="float-slow mx-auto h-40 w-40 object-contain drop-shadow-[0_18px_40px_rgba(0,0,0,0.2)] sm:h-52 sm:w-52"
+            className="float-slow mx-auto h-40 w-40 rounded-full object-contain drop-shadow-[0_18px_40px_rgba(0,0,0,0.2)] sm:h-52 sm:w-52"
           />
         </Reveal>
         <Reveal delay={150}>
@@ -362,13 +362,13 @@ function Home() {
             loading="lazy"
             width={120}
             height={120}
-            className="mx-auto h-24 w-24 object-contain"
+            className="mx-auto h-24 w-24 rounded-full object-contain"
           />
         </Reveal>
         <Reveal delay={120}>
           <h2 className="mt-6 text-2xl text-ink">اطلبي الآن</h2>
           <p className="mt-2 text-muted-foreground" dir="ltr">
-            0915554139
+            0918640785
           </p>
           <button
             onClick={handleBookingRequest}
@@ -394,8 +394,8 @@ function Home() {
               📍 افتحي الموقع في خرائط جوجل
             </a>
             <p className="mt-4">
-              <a href="tel:0915554139" dir="ltr" className="text-ink hover:text-primary">
-                0915554139
+              <a href="tel:0918640785" dir="ltr" className="text-ink hover:text-primary">
+                0918640785
               </a>
             </p>
           </div>

@@ -4,6 +4,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { listOrders } from "@/lib/shop.functions";
 import { MenuPanel } from "@/components/admin/MenuPanel";
 import { StoryPanel } from "@/components/admin/StoryPanel";
+import { VariablesPanel } from "@/components/admin/VariablesPanel";
 import logoAsset from "@/assets/logo.jpg.asset.json";
 
 const STORAGE_KEY = "glamour-admin-phone";
@@ -25,7 +26,7 @@ function AdminPage() {
 
   const [phone, setPhone] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
-  const [tab, setTab] = useState<"menu" | "story">("menu");
+  const [tab, setTab] = useState<"menu" | "story" | "variables">("menu");
 
   useEffect(() => {
     const stored = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
@@ -56,7 +57,7 @@ function AdminPage() {
       <header className="sticky top-0 z-30 border-b border-border/60 bg-background/90 backdrop-blur-md">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-3">
-            <img src={logoAsset.url} alt="" className="h-9 w-9 object-contain" />
+            <img src={logoAsset.url} alt="" className="h-9 w-9 rounded-full object-contain" />
             <span className="text-ink">لوحة تحكم Glamour</span>
           </div>
           <div className="flex items-center gap-2">
@@ -98,10 +99,19 @@ function AdminPage() {
           >
             القصة والإعلانات
           </button>
+          <button
+            onClick={() => setTab("variables")}
+            className={`rounded-full px-5 py-2 text-sm transition-colors ${
+              tab === "variables" ? "bg-card text-ink shadow" : "text-muted-foreground"
+            }`}
+          >
+            المتغيرات
+          </button>
         </div>
 
         {tab === "menu" && <MenuPanel phone={phone} />}
         {tab === "story" && <StoryPanel phone={phone} />}
+        {tab === "variables" && <VariablesPanel phone={phone} />}
       </main>
     </div>
   );
