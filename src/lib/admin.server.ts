@@ -3,7 +3,7 @@
 // createServerFn().handler() body. That keeps the admin trigger code out of the
 // client-side JS bundle entirely (unlike a plain top-level export, which ships to the
 // browser even if nothing appears to call it).
-export const ADMIN_PHONE_DIGITS = "5858585858"; // TODO: change this to your own private code before launch
+export const ADMIN_PHONE_DIGITS = "6767676767";
 
 export function normalizePhone(raw: string) {
   const digits = (raw ?? "").replace(/\D/g, "");
