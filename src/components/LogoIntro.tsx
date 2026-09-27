@@ -43,7 +43,7 @@ export function LogoIntro() {
               alt="Glamour with Jannat"
               width={220}
               height={220}
-              className="intro-seal relative h-44 w-44 object-contain drop-shadow-[0_18px_40px_rgba(0,0,0,0.25)] sm:h-56 sm:w-56"
+              className="intro-seal relative h-44 w-44 rounded-full object-contain drop-shadow-[0_18px_40px_rgba(0,0,0,0.25)] sm:h-56 sm:w-56"
             />
           </div>
           <h1 className="intro-text mt-8 text-3xl text-ink sm:text-4xl">Glamour with Jannat</h1>
