@@ -107,6 +107,33 @@ export type Database = {
         }
         Relationships: []
       }
+      product_variables: {
+        Row: {
+          created_at: string
+          id: string
+          name: string
+          option_values: string[]
+          sort_order: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          name: string
+          option_values?: string[]
+          sort_order?: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          name?: string
+          option_values?: string[]
+          sort_order?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       promotions: {
         Row: {
           created_at: string
