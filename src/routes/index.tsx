@@ -1,22 +1,35 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
-import { getMenu, getStorySection } from "@/lib/shop.functions";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowRight, Check, Plus, Search, ShoppingBag, X } from "lucide-react";
+import { getCategories, getMenu, getStorySection, type MenuItem } from "@/lib/shop.functions";
 import { LogoIntro } from "@/components/LogoIntro";
-import { Reveal } from "@/components/Reveal";
 import { Carousel } from "@/components/Carousel";
 import { BookingDialog } from "@/components/BookingDialog";
-import { useCart } from "@/lib/cart";
-import logoAsset from "@/assets/logo.jpg.asset.json";
+import { ProductSheet, formatPrice } from "@/components/ProductSheet";
+import { SocialLinks } from "@/components/SocialLinks";
+import { optionsLabel, useCart, type CartOption } from "@/lib/cart";
+import { buildSearchIndex, searchProducts } from "@/lib/search";
 
 const menuQuery = queryOptions({ queryKey: ["menu"], queryFn: () => getMenu() });
 const storyQuery = queryOptions({ queryKey: ["story"], queryFn: () => getStorySection() });
+const categoriesQuery = queryOptions({
+  queryKey: ["categories"],
+  queryFn: () => getCategories(),
+});
+
+// The open category lives in the URL (?cat=...), so the phone's back button returns from a
+// category to the category squares instead of leaving the site.
+type HomeSearch = { cat?: string };
 
 export const Route = createFileRoute("/")({
+  validateSearch: (search: Record<string, unknown>): HomeSearch =>
+    typeof search["cat"] === "string" && search["cat"] ? { cat: search["cat"] } : {},
   loader: ({ context }) =>
     Promise.all([
       context.queryClient.ensureQueryData(menuQuery),
       context.queryClient.ensureQueryData(storyQuery),
+      context.queryClient.ensureQueryData(categoriesQuery),
     ]),
   head: () => ({
     meta: [
@@ -24,7 +37,7 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Glamour with Jannat — مكياج، عناية بالبشرة وعطور مختارة بعناية. اطلبي منتجاتك بسهولة عبر واتساب.",
+          "Glamour with Jannat — مكياج، عناية بالبشرة، عطور وعناية بالشعر. توصيل لجميع أنحاء ليبيا، اطلبي عبر واتساب.",
       },
       { property: "og:title", content: "Glamour with Jannat" },
       {
@@ -36,57 +49,132 @@ export const Route = createFileRoute("/")({
   component: Home,
 });
 
+// Arabic number agreement: 1 منتج واحد، 2 منتجان، 3–10 منتجات، 11+ منتج
+function arCount(n: number, [one, two, few, many]: [string, string, string, string]) {
+  if (n === 1) return one;
+  if (n === 2) return two;
+  if (n >= 3 && n <= 10) return `${n} ${few}`;
+  return `${n} ${many}`;
+}
+
 function Home() {
   const { data: menu } = useSuspenseQuery(menuQuery);
   const { data: story } = useSuspenseQuery(storyQuery);
-  const heroImage = story.hero_image_url;
-  const { lines, add, remove, setQty, count, total } = useCart();
+  const { data: categoryInfo } = useSuspenseQuery(categoriesQuery);
+  const { cat } = Route.useSearch();
+  const navigate = useNavigate();
+  const { lines, add, remove, setQty, count, total, qtyOfProduct } = useCart();
+
   const [booking, setBooking] = useState(false);
   const [cartOpen, setCartOpen] = useState(false);
+  const [sheetItem, setSheetItem] = useState<MenuItem | null>(null);
   const [justAdded, setJustAdded] = useState<string | null>(null);
   const [limitHit, setLimitHit] = useState<string | null>(null);
   const [menuPrompt, setMenuPrompt] = useState(false);
+  const [query, setQuery] = useState("");
+  const shopRef = useRef<HTMLElement>(null);
 
-  const available = menu.filter((m) => m.is_available);
-  const categories = [...new Set(available.map((m) => m.category))];
+  const available = useMemo(() => menu.filter((m) => m.is_available), [menu]);
 
-  function categoryAnchor(cat: string) {
-    return `cat-${cat.replace(/\s+/g, "-")}`;
+  // Categories come from the products (in product order); the admin's photo is used when
+  // set, otherwise the first product photo in that category.
+  const categories = useMemo(() => {
+    const names = [...new Set(available.map((m) => m.category))];
+    return names.map((name) => {
+      const items = available.filter((m) => m.category === name);
+      const photo =
+        categoryInfo.find((c) => c.name === name)?.image_url ??
+        items.find((m) => m.image_url)?.image_url ??
+        null;
+      return { name, items, photo };
+    });
+  }, [available, categoryInfo]);
+
+  const activeCategory = categories.find((c) => c.name === cat) ?? null;
+
+  const searchIndex = useMemo(() => buildSearchIndex(available), [available]);
+  const results = useMemo(
+    () => (query.trim() ? searchProducts(searchIndex, query) : null),
+    [searchIndex, query],
+  );
+
+  // null = stock not tracked.
+  const productById = new Map(menu.map((m) => [m.id, m]));
+  function remainingFor(id: string) {
+    const stock = productById.get(id)?.stock;
+    if (stock === null || stock === undefined) return null;
+    return Math.max(0, stock - qtyOfProduct(id));
+  }
+  const overStockIds = new Set(
+    lines
+      .filter((l) => {
+        const stock = productById.get(l.id)?.stock;
+        return stock !== null && stock !== undefined && qtyOfProduct(l.id) > stock;
+      })
+      .map((l) => l.id),
+  );
+  // Lines whose options no longer match the product (options added or edited after the
+  // customer put it in the cart). The server would refuse these, so catch them here first.
+  const staleKeys = new Set(
+    lines
+      .filter((l) => {
+        const product = productById.get(l.id);
+        if (!product || product.variables.length === 0) return false;
+        return product.variables.some((v) => {
+          const chosen = l.options?.find((o) => o.name === v.name);
+          return !chosen || !v.values.some((x) => x.label === chosen.value);
+        });
+      })
+      .map((l) => l.key),
+  );
+
+  function flash(setter: (v: string | null) => void, id: string, ms: number) {
+    setter(id);
+    window.setTimeout(() => setter(null), ms);
   }
 
-  function scrollToCategory(cat: string) {
-    document
-      .getElementById(categoryAnchor(cat))
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
-  // null = stock not tracked. Used to grey out sold-out items and cap cart quantities.
-  const stockById = new Map(menu.map((m) => [m.id, m.stock]));
-  const qtyInCart = (id: string) => lines.find((l) => l.id === id)?.qty ?? 0;
-  const atLimit = (id: string) => {
-    const stock = stockById.get(id);
-    return stock !== null && stock !== undefined && qtyInCart(id) >= stock;
-  };
-  // Lines asking for more than is left (e.g. it sold out while sitting in the cart).
-  const overStockLines = lines.filter((l) => {
-    const stock = stockById.get(l.id);
-    return stock !== null && stock !== undefined && l.qty > stock;
-  });
-
-  function handleAdd(item: (typeof available)[number]) {
-    if (atLimit(item.id)) {
-      setLimitHit(item.id);
-      window.setTimeout(() => setLimitHit((cur) => (cur === item.id ? null : cur)), 1600);
+  function handleQuickAdd(item: MenuItem) {
+    if (item.variables.length > 0) {
+      setSheetItem(item);
       return;
     }
-    add({
-      id: item.id,
-      name: item.name,
-      price: Number(item.price),
-      image_url: item.image_url,
-    });
-    setJustAdded(item.id);
-    window.setTimeout(() => setJustAdded((cur) => (cur === item.id ? null : cur)), 1100);
+    if (remainingFor(item.id) === 0) {
+      flash(setLimitHit, item.id, 1600);
+      return;
+    }
+    add({ id: item.id, name: item.name, price: Number(item.price), image_url: item.image_url });
+    flash(setJustAdded, item.id, 1100);
+  }
+
+  function handleSheetAdd(item: MenuItem, options: CartOption[], qty: number) {
+    // Cart thumbnail shows the chosen value's photo when there is one (e.g. the red shade).
+    const valueImage = item.variables
+      .map((v) => v.values.find((x) => x.label === options.find((o) => o.name === v.name)?.value))
+      .find((x) => x?.image_url)?.image_url;
+    add(
+      {
+        id: item.id,
+        name: item.name,
+        price: Number(item.price),
+        image_url: valueImage ?? item.image_url,
+        options,
+      },
+      qty,
+    );
+    setSheetItem(null);
+    flash(setJustAdded, item.id, 1100);
+  }
+
+  function scrollToShop() {
+    requestAnimationFrame(() =>
+      shopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    );
+  }
+
+  function showCategory(name?: string) {
+    setQuery("");
+    navigate({ to: "/", search: name ? { cat: name } : {}, resetScroll: false });
+    scrollToShop();
   }
 
   function handleBookingRequest() {
@@ -94,9 +182,8 @@ function Home() {
       setCartOpen(true);
       return;
     }
-
     setMenuPrompt(true);
-    document.getElementById("menu")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    scrollToShop();
     window.setTimeout(() => setMenuPrompt(false), 3500);
   }
 
@@ -109,301 +196,347 @@ function Home() {
     };
   }, [cartOpen, booking]);
 
+  // A plain render function, not an inner component: an inner component would be a new type
+  // on every render and remount the whole list (and its images) on each search keystroke.
+  function renderProductList(items: MenuItem[], withCategory = false) {
+    return (
+      <ul className="mt-2 divide-y divide-border">
+        {items.map((item) => {
+          const soldOut = item.stock === 0;
+          return (
+            <li
+              key={item.id}
+              className={`flex items-center gap-3 py-4 ${soldOut ? "opacity-55" : ""}`}
+            >
+              <button
+                type="button"
+                onClick={() => setSheetItem(item)}
+                className="flex min-w-0 flex-1 items-center gap-3 text-start"
+              >
+                <span className="h-[72px] w-[72px] shrink-0 overflow-hidden rounded-2xl bg-muted">
+                  {item.image_url && (
+                    <img
+                      src={item.image_url}
+                      alt=""
+                      loading="lazy"
+                      className={`h-full w-full object-cover ${soldOut ? "grayscale" : ""}`}
+                    />
+                  )}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[16px] leading-6 font-bold text-ink">
+                    {item.name}
+                  </span>
+                  {item.description && (
+                    <span className="line-clamp-1 block text-sm text-muted-foreground">
+                      {item.description}
+                    </span>
+                  )}
+                  {withCategory && (
+                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                      {item.category}
+                    </span>
+                  )}
+                  {item.variables.length > 0 && (
+                    <span className="mt-0.5 block text-xs font-medium text-primary">
+                      اختاري {item.variables.map((v) => v.name).join(" و")}
+                    </span>
+                  )}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleQuickAdd(item)}
+                disabled={soldOut}
+                aria-label={soldOut ? `${item.name}: نفذت الكمية` : `أضيفي ${item.name} للسلة`}
+                className={`flex h-11 shrink-0 items-center gap-1.5 rounded-full px-4 font-extrabold transition-colors ${
+                  soldOut || limitHit === item.id
+                    ? "bg-muted text-muted-foreground"
+                    : justAdded === item.id
+                      ? "bg-ink text-white"
+                      : "bg-primary text-primary-foreground hover:bg-accent-foreground"
+                }`}
+              >
+                {soldOut ? (
+                  <span className="text-sm">نفذت</span>
+                ) : limitHit === item.id ? (
+                  <span className="text-sm">المتوفر {item.stock} فقط</span>
+                ) : justAdded === item.id ? (
+                  <>
+                    <Check className="h-4 w-4" strokeWidth={3} />
+                    <span className="text-sm">أضيفت</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-[17px] leading-none">{formatPrice(item.price)}</span>
+                    <span className="text-[11px] leading-none">د.ل</span>
+                    <Plus className="h-4 w-4" strokeWidth={3} />
+                  </>
+                )}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  }
+
   return (
-    <div className="relative overflow-x-hidden">
+    <div className="relative overflow-x-clip">
       <LogoIntro />
 
       {/* header */}
-      <header className="sticky top-0 z-30 border-b border-border/60 bg-background/80 backdrop-blur-md">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-3">
-            <img
-              src={logoAsset.url}
-              alt="شعار Glamour with Jannat"
-              width={48}
-              height={48}
-              className="h-11 w-11 rounded-full object-contain"
-            />
-            <span className="text-lg text-ink">Glamour with Jannat</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setCartOpen(true)}
-              className="relative rounded-full border border-border px-4 py-2 text-sm text-ink"
+      <header className="sticky top-0 z-30 border-b border-border/70 bg-background/90 backdrop-blur-md">
+        <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
+          <button
+            type="button"
+            dir="ltr"
+            onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+            className="font-wordmark text-[26px] leading-none tracking-wide text-primary"
+          >
+            GLAMOUR
+          </button>
+          <button
+            type="button"
+            onClick={() => setCartOpen(true)}
+            aria-label={`السلة: ${count}`}
+            className="flex h-10 items-center gap-2 rounded-full bg-primary ps-4 pe-1.5 text-primary-foreground shadow-[var(--shadow-soft)]"
+          >
+            <ShoppingBag className="h-5 w-5" />
+            <span
+              key={count}
+              className={`flex h-7 min-w-7 items-center justify-center rounded-full bg-white px-1.5 text-sm font-extrabold text-primary ${
+                count > 0 ? "cart-bump" : ""
+              }`}
             >
-              السلة
-              {count > 0 && (
-                <span
-                  key={count}
-                  className="cart-bump absolute -top-2 -left-2 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground"
-                >
-                  {count}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={handleBookingRequest}
-              className="rounded-full px-5 py-2 text-sm font-medium text-primary-foreground"
-              style={{ backgroundImage: "var(--gradient-pink)" }}
-            >
-              اطلبي الآن
-            </button>
-          </div>
+              {count}
+            </span>
+          </button>
         </div>
       </header>
 
       {/* hero */}
-      <section className="relative isolate overflow-hidden px-4 pt-16 pb-24 text-center">
-        {heroImage ? (
+      <section className="relative isolate overflow-hidden bg-primary text-primary-foreground">
+        {story.hero_image_url && (
           <>
-            {/* admin's photo: slightly blurred (scaled up so the blur doesn't leave soft edges)
-                under a dark tint, so the white text and logo stay readable on any photo */}
             <img
-              src={heroImage}
+              src={story.hero_image_url}
               alt=""
               aria-hidden
-              className="pointer-events-none absolute inset-0 -z-20 h-full w-full scale-110 object-cover blur-[3px]"
+              className="pointer-events-none absolute inset-0 -z-20 h-full w-full object-cover"
             />
-            <div className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-b from-black/60 via-black/50 to-black/70" />
-          </>
-        ) : (
-          <>
-            <div
-              className="pointer-events-none absolute inset-0 -z-10"
-              style={{ background: "var(--gradient-petal)" }}
-            />
-            <div className="pointer-events-none absolute -top-16 -right-10 -z-10 h-56 w-56 rounded-full bg-primary/20 blur-3xl" />
+            <div className="pointer-events-none absolute inset-0 -z-10 bg-primary/80" />
           </>
         )}
-        <Reveal variant="zoom">
-          <img
-            src={logoAsset.url}
-            alt="Glamour with Jannat"
-            width={260}
-            height={260}
-            className="float-slow mx-auto h-40 w-40 rounded-full object-contain drop-shadow-[0_18px_40px_rgba(0,0,0,0.2)] sm:h-52 sm:w-52"
-          />
-        </Reveal>
-        <Reveal delay={150}>
-          <h1
-            className={`mt-8 text-4xl leading-tight sm:text-5xl ${
-              heroImage ? "text-white drop-shadow-[0_2px_12px_rgba(0,0,0,0.5)]" : "text-ink"
-            }`}
-          >
-            {story.hero_title}
-          </h1>
-        </Reveal>
-        <Reveal delay={280}>
-          <p
-            className={`mx-auto mt-4 max-w-md ${heroImage ? "text-white/85" : "text-muted-foreground"}`}
-          >
-            {story.hero_subtitle}
-          </p>
-        </Reveal>
-        <Reveal delay={420}>
-          <button
-            onClick={handleBookingRequest}
-            className="mt-8 rounded-full px-10 py-4 text-lg font-medium text-primary-foreground shadow-[var(--shadow-soft)]"
-            style={{ backgroundImage: "var(--gradient-pink)" }}
-          >
-            تسوّقي الآن
-          </button>
-        </Reveal>
+        <div className="mx-auto grid max-w-5xl gap-12 px-5 pt-12 pb-16 md:grid-cols-[1.15fr_1fr] md:items-center md:pb-20">
+          <div>
+            <p className="text-[15px] font-medium text-white/90">{story.hero_title}</p>
+            <h1
+              dir="ltr"
+              className="font-wordmark mt-2 text-right text-[clamp(3.5rem,21vw,8.5rem)] leading-[0.86] font-normal whitespace-nowrap"
+            >
+              GLAMOUR
+            </h1>
+            <p dir="ltr" className="mt-1 text-right text-xl font-medium text-white/90">
+              with Jannat
+            </p>
+            <p className="mt-6 max-w-md text-[17px] leading-8 text-white/90">
+              {story.hero_subtitle}
+            </p>
+            <button
+              type="button"
+              onClick={() => showCategory()}
+              className="mt-8 h-14 rounded-full bg-white px-9 text-base font-extrabold text-primary shadow-[0_14px_30px_-14px_rgba(0,0,0,0.45)] transition-transform hover:scale-[1.02]"
+            >
+              تصفّحي المنتجات
+            </button>
+          </div>
+
+          {/* ads card */}
+          {story.images.length > 0 && (
+            <div className="mx-auto w-[86%] max-w-sm -rotate-3 rounded-[28px] bg-white p-2 text-ink shadow-[0_30px_60px_-25px_rgba(0,0,0,0.5)]">
+              <div className="overflow-hidden rounded-[22px]">
+                <Carousel
+                  images={story.images.map((img) => ({ url: img.image_url, ratio: img.ratio }))}
+                  autoPlay={4500}
+                />
+              </div>
+              <div className="flex items-center justify-between px-3 pb-1">
+                <span dir="ltr" className="font-wordmark text-sm tracking-wide text-primary">
+                  GLAMOUR
+                </span>
+                <span className="text-xs text-muted-foreground">عروضنا</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* shop */}
+      <section id="menu" ref={shopRef} className="scroll-mt-14">
+        <div className="sticky top-14 z-20 border-b border-border/70 bg-background/95 backdrop-blur-md">
+          <div className="mx-auto max-w-5xl px-4 py-3">
+            <label className="relative block">
+              <span className="sr-only">ابحثي عن منتج</span>
+              <Search className="pointer-events-none absolute top-1/2 right-4 h-5 w-5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="search"
+                dir="auto"
+                enterKeyHint="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="ابحثي عن منتج، لون أو قسم / Search"
+                className="h-12 w-full rounded-full border border-border bg-card ps-11 pe-11 text-[16px] text-ink outline-none placeholder:text-muted-foreground focus:border-primary"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  aria-label="مسح البحث"
+                  className="absolute top-1/2 left-2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-muted"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </label>
+
+            {activeCategory && !results && (
+              <div className="scrollbar-none -mx-4 mt-3 flex items-center gap-2 overflow-x-auto px-4">
+                <button
+                  type="button"
+                  onClick={() => showCategory()}
+                  className="flex h-9 shrink-0 items-center gap-1 rounded-full bg-muted px-3 text-sm text-ink"
+                >
+                  <ArrowRight className="h-4 w-4" />
+                  كل الأقسام
+                </button>
+                {categories.map((c) => (
+                  <button
+                    key={c.name}
+                    type="button"
+                    onClick={() => showCategory(c.name)}
+                    aria-current={c.name === activeCategory.name ? "true" : undefined}
+                    className={`h-9 shrink-0 rounded-full px-4 text-sm font-bold transition-colors ${
+                      c.name === activeCategory.name
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-primary"
+                    }`}
+                  >
+                    {c.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="mx-auto min-h-[60vh] max-w-5xl px-4 pt-6 pb-16">
+          {menuPrompt && (
+            <p
+              role="status"
+              className="animate-fade-in mx-auto mb-5 w-fit rounded-xl border border-primary/30 bg-accent px-5 py-3 text-center font-medium text-accent-foreground"
+            >
+              اختاري منتجًا أولاً
+            </p>
+          )}
+
+          {results ? (
+            results.length > 0 ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  {arCount(results.length, ["نتيجة واحدة", "نتيجتان", "نتائج", "نتيجة"])}
+                </p>
+                {renderProductList(results, true)}
+              </>
+            ) : (
+              <div className="py-12 text-center">
+                <p className="text-lg text-ink">لا توجد نتائج لـ «{query.trim()}»</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  جرّبي كلمة أخرى، أو اسم اللون، أو تصفحي الأقسام.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  className="mt-5 rounded-full border border-primary px-6 py-2.5 text-sm font-bold text-primary"
+                >
+                  تصفّحي الأقسام
+                </button>
+              </div>
+            )
+          ) : activeCategory ? (
+            <>
+              <h2 className="text-2xl text-ink">{activeCategory.name}</h2>
+              {renderProductList(activeCategory.items)}
+            </>
+          ) : (
+            <>
+              <h2 className="text-2xl text-ink">تسوّقي حسب القسم</h2>
+              {categories.length === 0 ? (
+                <p className="py-12 text-center text-muted-foreground">لا توجد منتجات بعد</p>
+              ) : (
+                <div className="mt-5 grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                  {categories.map((c) => (
+                    <button
+                      key={c.name}
+                      type="button"
+                      onClick={() => showCategory(c.name)}
+                      className="group text-start"
+                    >
+                      <span className="block truncate text-base font-bold text-ink">{c.name}</span>
+                      <span className="mt-2 block aspect-square overflow-hidden rounded-2xl border border-border bg-muted">
+                        {c.photo ? (
+                          <img
+                            src={c.photo}
+                            alt=""
+                            loading="lazy"
+                            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                          />
+                        ) : (
+                          <span className="flex h-full items-center justify-center text-5xl font-extrabold text-primary/35">
+                            {c.name.slice(0, 1)}
+                          </span>
+                        )}
+                      </span>
+                      <span className="mt-1.5 block text-xs text-muted-foreground">
+                        {arCount(c.items.length, ["منتج واحد", "منتجان", "منتجات", "منتج"])}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </section>
 
       {/* story */}
-      <section className="mx-auto max-w-4xl px-4 py-16">
-        <Reveal>
-          <p className="text-center text-sm tracking-[0.35em] text-primary">{story.story_label}</p>
-        </Reveal>
-        <Reveal delay={120}>
-          <h2 className="mt-4 text-center text-3xl text-ink">{story.story_title}</h2>
-        </Reveal>
-        <Reveal delay={240}>
-          <p className="mx-auto mt-5 max-w-xl text-center leading-8 text-muted-foreground">
-            {story.story_text}
-          </p>
-        </Reveal>
-        {story.images.length > 0 && (
-          <Reveal delay={280}>
-            {/* Full-bleed breakout: margin math (not left/right positioning) so it centers
-                correctly under dir="rtl" too — left/right flip meaning in RTL. */}
-            <div className="mx-[calc(50%-50vw)] mt-12 w-screen md:mx-auto md:w-full md:max-w-xl">
-              <Carousel
-                images={story.images.map((img) => ({ url: img.image_url, ratio: img.ratio }))}
-              />
-            </div>
-          </Reveal>
-        )}
-      </section>
-
-      {/* menu */}
-      <section id="menu" className="mx-auto max-w-5xl px-4 py-16">
-        <Reveal>
-          <p className="text-center text-sm tracking-[0.35em] text-primary">منتجاتنا</p>
-        </Reveal>
-        <Reveal delay={120}>
-          <h2 className="mt-4 text-center text-3xl text-ink">اكتشفي مجموعتنا</h2>
-        </Reveal>
-
-        {menuPrompt && (
-          <p
-            role="status"
-            className="animate-fade-in mx-auto mt-5 w-fit rounded-xl border border-primary/30 bg-accent px-5 py-3 text-center font-medium text-accent-foreground shadow-[var(--shadow-card)]"
-          >
-            اختاري منتجًا أولاً
-          </p>
-        )}
-
-        {categories.length > 1 && (
-          <Reveal>
-            <div className="scrollbar-none -mx-4 mt-8 flex gap-2 overflow-x-auto px-4 pb-2">
-              {categories.map((cat) => (
-                <button
-                  key={cat}
-                  onClick={() => scrollToCategory(cat)}
-                  className="shrink-0 rounded-full border border-primary/40 bg-card px-5 py-2 text-sm text-ink shadow-[var(--shadow-card)] transition-colors hover:bg-primary hover:text-primary-foreground"
-                >
-                  {cat}
-                </button>
-              ))}
-            </div>
-          </Reveal>
-        )}
-
-        {categories.map((cat, ci) => (
-          <div key={cat} id={categoryAnchor(cat)} className="mt-12 scroll-mt-24">
-            <Reveal>
-              <h3 className="text-xl text-ink">{cat}</h3>
-            </Reveal>
-            <div className="mt-5 grid grid-cols-1 gap-5">
-              {available
-                .filter((m) => m.category === cat)
-                .map((item, i) => (
-                  <Reveal key={item.id} delay={i * 110 + ci * 40} variant="up">
-                    <article
-                      className={`group relative overflow-hidden rounded-3xl bg-card shadow-[var(--shadow-card)] transition ${
-                        item.stock === 0 ? "opacity-60 grayscale" : ""
-                      }`}
-                    >
-                      {item.stock === 0 && (
-                        <span className="absolute top-3 right-3 z-10 rounded-full bg-ink/80 px-3 py-1 text-xs text-white">
-                          نفذت الكمية
-                        </span>
-                      )}
-                      {item.image_url || item.extra_images.length > 0 ? (
-                        <Carousel
-                          images={[
-                            item.image_url
-                              ? { url: item.image_url, ratio: item.image_ratio }
-                              : null,
-                            ...item.extra_images.map((url, idx) => ({
-                              url,
-                              ratio: item.extra_image_ratios[idx] ?? null,
-                            })),
-                          ].filter(
-                            (img): img is { url: string; ratio: number | null } => img !== null,
-                          )}
-                        />
-                      ) : null}
-                      <div className="p-5">
-                        <h4 className="text-lg text-ink">{item.name}</h4>
-                        {item.description && (
-                          <p className="mt-1 text-sm text-muted-foreground">{item.description}</p>
-                        )}
-                        <div className="mt-4 flex items-center justify-between">
-                          <span className="font-bold text-primary">
-                            {Number(item.price).toFixed(2)} د.ل
-                          </span>
-                          {item.stock === 0 ? (
-                            <button
-                              disabled
-                              className="cursor-not-allowed rounded-full border border-border px-4 py-2 text-sm text-muted-foreground"
-                            >
-                              نفذت الكمية
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => handleAdd(item)}
-                              className={`rounded-full border px-4 py-2 text-sm transition-colors ${
-                                limitHit === item.id
-                                  ? "border-border text-muted-foreground"
-                                  : justAdded === item.id
-                                    ? "border-primary bg-primary text-primary-foreground"
-                                    : "border-primary text-primary hover:bg-primary hover:text-primary-foreground"
-                              }`}
-                            >
-                              {limitHit === item.id
-                                ? `المتوفر ${item.stock} فقط`
-                                : justAdded === item.id
-                                  ? "✓ أضيفت للسلة"
-                                  : "أضيفي للسلة"}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </article>
-                  </Reveal>
-                ))}
-            </div>
-          </div>
-        ))}
+      <section className="border-t border-border bg-secondary px-5 py-16 text-center">
+        <p className="text-sm font-bold text-primary">{story.story_label}</p>
+        <h2 className="mt-3 text-3xl text-ink">{story.story_title}</h2>
+        <p className="mx-auto mt-4 max-w-xl leading-8 text-muted-foreground">{story.story_text}</p>
       </section>
 
       {/* contact */}
-      <footer
-        className="mt-10 px-4 py-16 text-center"
-        style={{ background: "var(--gradient-petal)" }}
-      >
-        <Reveal variant="zoom">
-          <img
-            src={logoAsset.url}
-            alt="شعار Glamour with Jannat"
-            loading="lazy"
-            width={120}
-            height={120}
-            className="mx-auto h-24 w-24 rounded-full object-contain"
-          />
-        </Reveal>
-        <Reveal delay={120}>
-          <h2 className="mt-6 text-2xl text-ink">اطلبي الآن</h2>
-          <p className="mt-2 text-muted-foreground" dir="ltr">
-            0918640785
-          </p>
-          <button
-            onClick={handleBookingRequest}
-            className="mt-6 rounded-full px-8 py-3 font-medium text-primary-foreground"
-            style={{ backgroundImage: "var(--gradient-pink)" }}
-          >
-            اطلبي الآن
-          </button>
-        </Reveal>
-
-        <Reveal delay={220}>
-          <div className="mx-auto mt-10 max-w-sm rounded-3xl bg-card/70 p-5 text-sm text-muted-foreground">
-            <p className="text-xs tracking-[0.3em] text-primary">تواصلي معنا</p>
-            <p className="mt-2 text-ink">
-              بنغازي، ليبيا — توصيل داخل المدينة
-            </p>
-            <a
-              href="https://www.google.com/maps/search/?api=1&query=Benghazi%2C+Libya"
-              target="_blank"
-              rel="noreferrer"
-              className="mt-4 inline-flex items-center gap-2 rounded-xl border border-primary bg-card px-5 py-3 font-bold text-primary shadow-[var(--shadow-card)] transition-colors hover:bg-primary hover:text-primary-foreground"
-            >
-              📍 افتحي الموقع في خرائط جوجل
-            </a>
-            <p className="mt-4">
-              <a href="tel:0918640785" dir="ltr" className="text-ink hover:text-primary">
-                0918640785
-              </a>
-            </p>
-          </div>
-        </Reveal>
-
-        <Reveal delay={320}>
-          <p className="mt-8 text-xs text-muted-foreground">© Glamour with Jannat</p>
-        </Reveal>
+      <footer className="bg-ink px-5 pt-14 pb-10 text-center text-white">
+        <h2 className="text-2xl">تواصلي معنا</h2>
+        <a
+          href="tel:0918640785"
+          dir="ltr"
+          className="mt-3 inline-block text-2xl font-bold tracking-wide hover:text-primary-soft"
+        >
+          0918640785
+        </a>
+        <p className="mt-2 text-white/75">ليبيا، طرابلس - توصيل جميع أنحاء ليبيا</p>
+        <SocialLinks className="mt-6" />
+        <button
+          type="button"
+          onClick={handleBookingRequest}
+          className="mt-9 h-12 rounded-full bg-white px-9 font-extrabold text-primary"
+        >
+          اطلبي الآن
+        </button>
+        <p className="mt-10 text-xs text-white/50">© Glamour with Jannat</p>
       </footer>
 
       {/* cart drawer */}
@@ -414,6 +547,7 @@ function Home() {
               <h2 className="text-2xl text-ink">سلة المشتريات</h2>
               <button
                 onClick={() => setCartOpen(false)}
+                aria-label="إغلاق"
                 className="rounded-full px-3 py-1 hover:bg-muted"
               >
                 ✕
@@ -423,60 +557,73 @@ function Home() {
               <p className="py-10 text-center text-muted-foreground">السلة فارغة</p>
             ) : (
               <>
-                <div className="mt-5 space-y-3">
-                  {lines.map((l) => (
-                    <div key={l.id} className="flex items-center gap-3">
-                      {l.image_url && (
-                        <img
-                          src={l.image_url}
-                          alt={l.name}
-                          className="h-14 w-14 rounded-2xl object-cover"
-                        />
-                      )}
-                      <div className="flex-1">
-                        <p className="text-ink">{l.name}</p>
-                        <p className="text-sm text-muted-foreground">{l.price.toFixed(2)} د.ل</p>
-                        {overStockLines.some((o) => o.id === l.id) && (
-                          <p className="text-xs text-destructive">
-                            {stockById.get(l.id) === 0
-                              ? "نفذت الكمية — يرجى إزالته"
-                              : `المتوفر ${stockById.get(l.id)} فقط`}
-                          </p>
+                <div className="mt-5 space-y-4">
+                  {lines.map((l) => {
+                    const stock = productById.get(l.id)?.stock;
+                    return (
+                      <div key={l.key} className="flex items-center gap-3">
+                        {l.image_url && (
+                          <img
+                            src={l.image_url}
+                            alt=""
+                            className="h-14 w-14 shrink-0 rounded-2xl object-cover"
+                          />
                         )}
+                        <div className="min-w-0 flex-1">
+                          <p className="text-ink">{l.name}</p>
+                          {l.options && l.options.length > 0 && (
+                            <p className="text-xs text-muted-foreground">
+                              {optionsLabel(l.options)}
+                            </p>
+                          )}
+                          <p className="text-sm text-muted-foreground">{l.price.toFixed(2)} د.ل</p>
+                          {overStockIds.has(l.id) && (
+                            <p className="text-xs text-destructive">
+                              {stock === 0 ? "نفذت الكمية — يرجى إزالته" : `المتوفر ${stock} فقط`}
+                            </p>
+                          )}
+                          {staleKeys.has(l.key) && (
+                            <p className="text-xs text-destructive">
+                              تغيّرت خيارات هذا المنتج، احذفيه وأضيفيه من جديد
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setQty(l.key, l.qty - 1)}
+                            aria-label="إنقاص"
+                            className="h-8 w-8 rounded-full bg-muted"
+                          >
+                            −
+                          </button>
+                          <span>{l.qty}</span>
+                          <button
+                            onClick={() => setQty(l.key, l.qty + 1)}
+                            disabled={remainingFor(l.id) === 0}
+                            aria-label="زيادة"
+                            className="h-8 w-8 rounded-full bg-muted disabled:opacity-40"
+                          >
+                            +
+                          </button>
+                          <button
+                            onClick={() => remove(l.key)}
+                            aria-label="إزالة الصنف"
+                            className="mr-1 flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-destructive"
+                          >
+                            ✕
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setQty(l.id, l.qty - 1)}
-                          className="h-8 w-8 rounded-full bg-muted"
-                        >
-                          −
-                        </button>
-                        <span>{l.qty}</span>
-                        <button
-                          onClick={() => setQty(l.id, l.qty + 1)}
-                          disabled={atLimit(l.id)}
-                          className="h-8 w-8 rounded-full bg-muted disabled:opacity-40"
-                        >
-                          +
-                        </button>
-                        <button
-                          onClick={() => remove(l.id)}
-                          aria-label="إزالة الصنف"
-                          className="mr-1 flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-destructive"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 <div className="mt-5 flex justify-between border-t border-border pt-4 font-bold text-ink">
                   <span>الإجمالي</span>
                   <span>{total.toFixed(2)} د.ل</span>
                 </div>
-                {overStockLines.length > 0 && (
+                {(overStockIds.size > 0 || staleKeys.size > 0) && (
                   <p className="mt-4 text-center text-sm text-destructive">
-                    بعض الأصناف لم تعد متوفرة بالكمية المطلوبة، يرجى تعديل السلة
+                    عدّلي الأصناف المحددة باللون الأحمر لإكمال الطلب
                   </p>
                 )}
                 <button
@@ -484,8 +631,8 @@ function Home() {
                     setCartOpen(false);
                     setBooking(true);
                   }}
-                  disabled={overStockLines.length > 0}
-                  className="mt-5 w-full rounded-full px-6 py-3 font-medium text-primary-foreground disabled:opacity-50"
+                  disabled={overStockIds.size > 0 || staleKeys.size > 0}
+                  className="mt-5 w-full rounded-full px-6 py-3 font-bold text-primary-foreground disabled:opacity-50"
                   style={{ backgroundImage: "var(--gradient-pink)" }}
                 >
                   إتمام الطلب
@@ -495,6 +642,13 @@ function Home() {
           </div>
         </div>
       )}
+
+      <ProductSheet
+        item={sheetItem}
+        remaining={sheetItem ? remainingFor(sheetItem.id) : null}
+        onClose={() => setSheetItem(null)}
+        onAdd={handleSheetAdd}
+      />
 
       <BookingDialog open={booking} onClose={() => setBooking(false)} />
     </div>

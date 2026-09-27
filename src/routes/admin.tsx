@@ -4,7 +4,6 @@ import { useServerFn } from "@tanstack/react-start";
 import { listOrders } from "@/lib/shop.functions";
 import { MenuPanel } from "@/components/admin/MenuPanel";
 import { StoryPanel } from "@/components/admin/StoryPanel";
-import { VariablesPanel } from "@/components/admin/VariablesPanel";
 import logoAsset from "@/assets/logo.jpg.asset.json";
 
 const STORAGE_KEY = "glamour-admin-phone";
@@ -26,7 +25,7 @@ function AdminPage() {
 
   const [phone, setPhone] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
-  const [tab, setTab] = useState<"menu" | "story" | "variables">("menu");
+  const [tab, setTab] = useState<"menu" | "story">("menu");
 
   useEffect(() => {
     const stored = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
@@ -97,21 +96,12 @@ function AdminPage() {
               tab === "story" ? "bg-card text-ink shadow" : "text-muted-foreground"
             }`}
           >
-            القصة والإعلانات
-          </button>
-          <button
-            onClick={() => setTab("variables")}
-            className={`rounded-full px-5 py-2 text-sm transition-colors ${
-              tab === "variables" ? "bg-card text-ink shadow" : "text-muted-foreground"
-            }`}
-          >
-            المتغيرات
+            الواجهة والإعلانات
           </button>
         </div>
 
         {tab === "menu" && <MenuPanel phone={phone} />}
         {tab === "story" && <StoryPanel phone={phone} />}
-        {tab === "variables" && <VariablesPanel phone={phone} />}
       </main>
     </div>
   );
