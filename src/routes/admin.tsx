@@ -8,7 +8,15 @@ import logoAsset from "@/assets/logo.jpg.asset.json";
 
 const STORAGE_KEY = "glamour-admin-phone";
 
+// ?tab=story = the second tab; ?edit=<id|new> = the product form that's open (see MenuPanel).
+// Both in the URL so a refresh keeps them and the back button closes the form first.
+type AdminSearch = { tab?: "story"; edit?: string };
+
 export const Route = createFileRoute("/admin")({
+  validateSearch: (search: Record<string, unknown>): AdminSearch => ({
+    ...(search["tab"] === "story" ? { tab: "story" as const } : {}),
+    ...(typeof search["edit"] === "string" && search["edit"] ? { edit: search["edit"] } : {}),
+  }),
   head: () => ({
     meta: [{ title: "لوحة تحكم Glamour with Jannat" }],
   }),
@@ -25,7 +33,18 @@ function AdminPage() {
 
   const [phone, setPhone] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
-  const [tab, setTab] = useState<"menu" | "story">("menu");
+  const search = Route.useSearch();
+  const tab = search.tab === "story" ? "story" : "menu";
+  // Switching tabs replaces the entry instead of adding one: back leaves the panel as a whole
+  // (or closes an open form), it doesn't flip through tabs.
+  function setTab(next: "menu" | "story") {
+    void navigate({
+      to: "/admin",
+      search: next === "story" ? { tab: "story" } : {},
+      replace: true,
+      resetScroll: false,
+    });
+  }
 
   useEffect(() => {
     const stored = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;

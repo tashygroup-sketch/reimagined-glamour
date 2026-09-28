@@ -16,6 +16,8 @@ import { ProductSheet, formatPrice, type AppliedDiscount } from "@/components/Pr
 import { SocialLinks } from "@/components/SocialLinks";
 import { optionsLabel, useCart, type CartOption } from "@/lib/cart";
 import { buildSearchIndex, searchProducts } from "@/lib/search";
+import { keepLayer, useCloseLayer, useLockScroll, withLayer } from "@/lib/back-layer";
+import { overStockValue, remainingForChoice } from "@/lib/stock";
 import { WHATSAPP_NUMBER } from "@/lib/whatsapp";
 
 const menuQuery = queryOptions({ queryKey: ["menu"], queryFn: () => getMenu() });
@@ -25,13 +27,23 @@ const categoriesQuery = queryOptions({
   queryFn: () => getCategories(),
 });
 
-// The open category lives in the URL (?cat=...), so the phone's back button returns from a
-// category to the category squares instead of leaving the site.
-type HomeSearch = { cat?: string };
+// What's open lives in the URL, each with its own history entry, so the phone's back button
+// closes the top thing first (product → category → squares) instead of leaving the site:
+//   ?cat=<name>       a category
+//   ?p=<product id>   the product sheet (also a shareable link to that product)
+//   ?panel=cart|order the cart / the order form
+type HomeSearch = { cat?: string; p?: string; panel?: "cart" | "order" };
 
 export const Route = createFileRoute("/")({
-  validateSearch: (search: Record<string, unknown>): HomeSearch =>
-    typeof search["cat"] === "string" && search["cat"] ? { cat: search["cat"] } : {},
+  validateSearch: (search: Record<string, unknown>): HomeSearch => {
+    const str = (k: string) =>
+      typeof search[k] === "string" && search[k] ? (search[k] as string) : undefined;
+    const cat = str("cat");
+    const p = str("p");
+    const panel =
+      search["panel"] === "cart" || search["panel"] === "order" ? search["panel"] : undefined;
+    return { ...(cat ? { cat } : {}), ...(p ? { p } : {}), ...(panel ? { panel } : {}) };
+  },
   loader: ({ context }) =>
     Promise.all([
       context.queryClient.ensureQueryData(menuQuery),
@@ -68,13 +80,13 @@ function Home() {
   const { data: menu } = useSuspenseQuery(menuQuery);
   const { data: story } = useSuspenseQuery(storyQuery);
   const { data: categoryInfo } = useSuspenseQuery(categoriesQuery);
-  const { cat } = Route.useSearch();
+  const { cat, p, panel } = Route.useSearch();
   const navigate = useNavigate();
+  const closeLayer = useCloseLayer();
   const { lines, add, remove, setQty, count, total, qtyOfProduct } = useCart();
 
-  const [booking, setBooking] = useState(false);
-  const [cartOpen, setCartOpen] = useState(false);
-  const [sheetItem, setSheetItem] = useState<MenuItem | null>(null);
+  const booking = panel === "order";
+  const cartOpen = panel === "cart";
   const [justAdded, setJustAdded] = useState<string | null>(null);
   const [limitHit, setLimitHit] = useState<string | null>(null);
   const [menuPrompt, setMenuPrompt] = useState(false);
@@ -82,6 +94,37 @@ function Home() {
   const shopRef = useRef<HTMLElement>(null);
 
   const available = useMemo(() => menu.filter((m) => m.is_available), [menu]);
+  const sheetItem = (p && available.find((m) => m.id === p)) || null;
+
+  // Opens a window with its own history entry. `replace` swaps the current window for the
+  // next one (cart → order form), so back from the form goes to the page, not the cart.
+  function openLayer(patch: { p?: string; panel?: "cart" | "order" }, replace = false) {
+    void navigate({
+      to: "/",
+      search: (prev) => {
+        const { p: _p, panel: _panel, ...rest } = prev;
+        return { ...rest, ...patch };
+      },
+      state: (prev) => (replace ? keepLayer(prev) : withLayer(prev)),
+      replace,
+      resetScroll: false,
+    });
+  }
+
+  function closeLayers() {
+    closeLayer(() =>
+      navigate({
+        to: "/",
+        search: ({ p: _p, panel: _panel, ...rest }) => rest,
+        replace: true,
+        resetScroll: false,
+      }),
+    );
+  }
+
+  const setSheetItem = (item: MenuItem | null) =>
+    item ? openLayer({ p: item.id }) : closeLayers();
+  const setCartOpen = (open: boolean) => (open ? openLayer({ panel: "cart" }) : closeLayers());
 
   // Categories come from the products (in product order); the admin's photo is used when
   // set, otherwise the first product photo in that category.
@@ -112,14 +155,27 @@ function Home() {
     if (stock === null || stock === undefined) return null;
     return Math.max(0, stock - qtyOfProduct(id));
   }
-  const overStockIds = new Set(
-    lines
-      .filter((l) => {
-        const stock = productById.get(l.id)?.stock;
-        return stock !== null && stock !== undefined && qtyOfProduct(l.id) > stock;
-      })
-      .map((l) => l.id),
-  );
+  // More pieces of this line can be added: the product total AND each of its chosen values.
+  function lineRemaining(l: (typeof lines)[number]) {
+    const product = productById.get(l.id);
+    return product ? remainingForChoice(product, lines, l.options ?? []) : null;
+  }
+  // The cart asks for more than there is (stock went down after it was added), or null.
+  function stockProblem(l: (typeof lines)[number]): string | null {
+    const product = productById.get(l.id);
+    if (!product) return null;
+    const value = overStockValue(product, lines, l.options);
+    if (value) {
+      return value.stock === 0
+        ? `نفذت الكمية من «${value.value}» — يرجى إزالته`
+        : `المتوفر من «${value.value}» ${value.stock} فقط`;
+    }
+    if (product.stock !== null && qtyOfProduct(l.id) > product.stock) {
+      return product.stock === 0 ? "نفذت الكمية — يرجى إزالته" : `المتوفر ${product.stock} فقط`;
+    }
+    return null;
+  }
+  const overStockKeys = new Set(lines.filter((l) => stockProblem(l)).map((l) => l.key));
   // Why a cart line can't be ordered as it is (the server would refuse it), or null.
   function lineProblem(l: (typeof lines)[number]): string | null {
     const product = productById.get(l.id);
@@ -145,7 +201,7 @@ function Home() {
   const belowMinIds = new Set(
     lines.filter((l) => qtyOfProduct(l.id) < minOf(l.id)).map((l) => l.id),
   );
-  const cartBlocked = overStockIds.size > 0 || problemKeys.size > 0 || belowMinIds.size > 0;
+  const cartBlocked = overStockKeys.size > 0 || problemKeys.size > 0 || belowMinIds.size > 0;
 
   function flash(setter: (v: string | null) => void, id: string, ms: number) {
     setter(id);
@@ -199,7 +255,7 @@ function Home() {
       },
       qty,
     );
-    setSheetItem(null);
+    closeLayers();
     flash(setJustAdded, item.id, 1100);
   }
 
@@ -225,14 +281,7 @@ function Home() {
     window.setTimeout(() => setMenuPrompt(false), 3500);
   }
 
-  useEffect(() => {
-    if (!cartOpen && !booking) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [cartOpen, booking]);
+  useLockScroll(cartOpen);
 
   // A plain render function, not an inner component: an inner component would be a new type
   // on every render and remount the whole grid (and its images) on each search keystroke.
@@ -626,8 +675,14 @@ function Home() {
 
       {/* cart drawer */}
       {cartOpen && (
-        <div className="fixed inset-0 z-40 flex items-end overflow-hidden bg-ink/40 backdrop-blur-sm sm:items-center sm:justify-center">
-          <div className="animate-scale-in max-h-[92dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-3xl bg-card p-6 sm:rounded-3xl">
+        <div
+          className="fixed inset-0 z-40 flex items-end overflow-hidden bg-ink/40 backdrop-blur-sm sm:items-center sm:justify-center"
+          onClick={() => setCartOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="animate-scale-in max-h-[92dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-3xl bg-card p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:rounded-3xl"
+          >
             <div className="flex items-center justify-between">
               <h2 className="text-2xl text-ink">سلة المشتريات</h2>
               <button
@@ -644,7 +699,7 @@ function Home() {
               <>
                 <div className="mt-5 space-y-4">
                   {lines.map((l) => {
-                    const stock = productById.get(l.id)?.stock;
+                    const stockMessage = stockProblem(l);
                     const min = minOf(l.id);
                     const afterMinus = qtyOfProduct(l.id) - 1;
                     const canMinus = afterMinus === 0 || afterMinus >= min;
@@ -678,10 +733,8 @@ function Home() {
                               </span>
                             )}
                           </p>
-                          {overStockIds.has(l.id) && (
-                            <p className="text-xs text-destructive">
-                              {stock === 0 ? "نفذت الكمية — يرجى إزالته" : `المتوفر ${stock} فقط`}
-                            </p>
+                          {stockMessage && (
+                            <p className="text-xs text-destructive">{stockMessage}</p>
                           )}
                           {belowMinIds.has(l.id) && (
                             <p className="text-xs text-destructive">
@@ -702,7 +755,7 @@ function Home() {
                           <span>{l.qty}</span>
                           <button
                             onClick={() => setQty(l.key, l.qty + 1)}
-                            disabled={remainingFor(l.id) === 0}
+                            disabled={lineRemaining(l) === 0}
                             aria-label="زيادة"
                             className="h-8 w-8 rounded-full bg-muted disabled:opacity-40"
                           >
@@ -730,10 +783,7 @@ function Home() {
                   </p>
                 )}
                 <button
-                  onClick={() => {
-                    setCartOpen(false);
-                    setBooking(true);
-                  }}
+                  onClick={() => openLayer({ panel: "order" }, true)}
                   disabled={cartBlocked}
                   className="mt-5 w-full rounded-full px-6 py-3 font-bold text-primary-foreground disabled:opacity-50"
                   style={{ backgroundImage: "var(--gradient-pink)" }}
@@ -746,15 +796,9 @@ function Home() {
         </div>
       )}
 
-      <ProductSheet
-        item={sheetItem}
-        remaining={sheetItem ? remainingFor(sheetItem.id) : null}
-        inCart={sheetItem ? qtyOfProduct(sheetItem.id) : 0}
-        onClose={() => setSheetItem(null)}
-        onAdd={handleSheetAdd}
-      />
+      <ProductSheet item={sheetItem} onClose={closeLayers} onAdd={handleSheetAdd} />
 
-      <BookingDialog open={booking} onClose={() => setBooking(false)} />
+      <BookingDialog open={booking} onClose={closeLayers} />
     </div>
   );
 }
