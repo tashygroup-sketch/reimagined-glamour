@@ -6,10 +6,11 @@ import { getCategories, getMenu, getStorySection, type MenuItem } from "@/lib/sh
 import { LogoIntro } from "@/components/LogoIntro";
 import { Carousel } from "@/components/Carousel";
 import { BookingDialog } from "@/components/BookingDialog";
-import { ProductSheet, formatPrice } from "@/components/ProductSheet";
+import { ProductSheet, formatPrice, type AppliedDiscount } from "@/components/ProductSheet";
 import { SocialLinks } from "@/components/SocialLinks";
 import { optionsLabel, useCart, type CartOption } from "@/lib/cart";
 import { buildSearchIndex, searchProducts } from "@/lib/search";
+import { WHATSAPP_NUMBER } from "@/lib/whatsapp";
 
 const menuQuery = queryOptions({ queryKey: ["menu"], queryFn: () => getMenu() });
 const storyQuery = queryOptions({ queryKey: ["story"], queryFn: () => getStorySection() });
@@ -113,20 +114,32 @@ function Home() {
       })
       .map((l) => l.id),
   );
-  // Lines whose options no longer match the product (options added or edited after the
-  // customer put it in the cart). The server would refuse these, so catch them here first.
-  const staleKeys = new Set(
-    lines
-      .filter((l) => {
-        const product = productById.get(l.id);
-        if (!product || product.variables.length === 0) return false;
-        return product.variables.some((v) => {
-          const chosen = l.options?.find((o) => o.name === v.name);
-          return !chosen || !v.values.some((x) => x.label === chosen.value);
-        });
-      })
-      .map((l) => l.key),
+  // Why a cart line can't be ordered as it is (the server would refuse it), or null.
+  function lineProblem(l: (typeof lines)[number]): string | null {
+    const product = productById.get(l.id);
+    if (!product) return null;
+    const optionsStale = product.variables.some((v) => {
+      const chosen = l.options?.find((o) => o.name === v.name);
+      return !chosen || !v.values.some((x) => x.label === chosen.value);
+    });
+    if (optionsStale) return "تغيّرت خيارات هذا المنتج، احذفيه وأضيفيه من جديد";
+    if (l.discount_code) {
+      const d = product.discount;
+      if (!d || (d.ends_at && new Date(d.ends_at).getTime() <= Date.now())) {
+        return "انتهى الخصم على هذا المنتج، احذفيه وأضيفيه من جديد";
+      }
+    } else if (Math.abs(l.price - Number(product.price)) > 0.005) {
+      return "تغيّر سعر هذا المنتج، احذفيه وأضيفيه من جديد";
+    }
+    return null;
+  }
+  const problemKeys = new Set(lines.filter((l) => lineProblem(l)).map((l) => l.key));
+  // Minimum quantity counts all option lines of one product together.
+  const minOf = (id: string) => productById.get(id)?.min_qty ?? 1;
+  const belowMinIds = new Set(
+    lines.filter((l) => qtyOfProduct(l.id) < minOf(l.id)).map((l) => l.id),
   );
+  const cartBlocked = overStockIds.size > 0 || problemKeys.size > 0 || belowMinIds.size > 0;
 
   function flash(setter: (v: string | null) => void, id: string, ms: number) {
     setter(id);
@@ -138,15 +151,26 @@ function Home() {
       setSheetItem(item);
       return;
     }
-    if (remainingFor(item.id) === 0) {
+    // Meets the minimum in one tap: e.g. minimum 3 → the first tap adds 3.
+    const qty = Math.max(1, item.min_qty - qtyOfProduct(item.id));
+    const remaining = remainingFor(item.id);
+    if (remaining !== null && remaining < qty) {
       flash(setLimitHit, item.id, 1600);
       return;
     }
-    add({ id: item.id, name: item.name, price: Number(item.price), image_url: item.image_url });
+    add(
+      { id: item.id, name: item.name, price: Number(item.price), image_url: item.image_url },
+      qty,
+    );
     flash(setJustAdded, item.id, 1100);
   }
 
-  function handleSheetAdd(item: MenuItem, options: CartOption[], qty: number) {
+  function handleSheetAdd(
+    item: MenuItem,
+    options: CartOption[],
+    qty: number,
+    discount: AppliedDiscount | null,
+  ) {
     // Cart thumbnail shows the chosen value's photo when there is one (e.g. the red shade).
     const valueImage = item.variables
       .map((v) => v.values.find((x) => x.label === options.find((o) => o.name === v.name)?.value))
@@ -155,9 +179,10 @@ function Home() {
       {
         id: item.id,
         name: item.name,
-        price: Number(item.price),
+        price: discount ? discount.price : Number(item.price),
         image_url: valueImage ?? item.image_url,
         options,
+        ...(discount ? { discount_code: discount.code, regular_price: Number(item.price) } : {}),
       },
       qty,
     );
@@ -197,23 +222,22 @@ function Home() {
   }, [cartOpen, booking]);
 
   // A plain render function, not an inner component: an inner component would be a new type
-  // on every render and remount the whole list (and its images) on each search keystroke.
-  function renderProductList(items: MenuItem[], withCategory = false) {
+  // on every render and remount the whole grid (and its images) on each search keystroke.
+  function renderProductGrid(items: MenuItem[], withCategory = false) {
     return (
-      <ul className="mt-2 divide-y divide-border">
+      <ul className="mt-4 grid grid-cols-2 gap-x-3 gap-y-7 sm:grid-cols-3 lg:grid-cols-4">
         {items.map((item) => {
           const soldOut = item.stock === 0;
+          const firstVariable = item.variables[0];
           return (
-            <li
-              key={item.id}
-              className={`flex items-center gap-3 py-4 ${soldOut ? "opacity-55" : ""}`}
-            >
-              <button
-                type="button"
-                onClick={() => setSheetItem(item)}
-                className="flex min-w-0 flex-1 items-center gap-3 text-start"
-              >
-                <span className="h-[72px] w-[72px] shrink-0 overflow-hidden rounded-2xl bg-muted">
+            <li key={item.id} className={soldOut ? "opacity-60" : ""}>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setSheetItem(item)}
+                  aria-label={item.name}
+                  className="block aspect-[3/4] w-full overflow-hidden rounded-2xl bg-muted"
+                >
                   {item.image_url && (
                     <img
                       src={item.image_url}
@@ -222,58 +246,73 @@ function Home() {
                       className={`h-full w-full object-cover ${soldOut ? "grayscale" : ""}`}
                     />
                   )}
-                </span>
-                <span className="min-w-0">
-                  <span className="block text-[16px] leading-6 font-bold text-ink">
-                    {item.name}
-                  </span>
-                  {item.description && (
-                    <span className="line-clamp-1 block text-sm text-muted-foreground">
-                      {item.description}
+                </button>
+                <div className="pointer-events-none absolute top-2 right-2 flex flex-col items-start gap-1">
+                  {soldOut && (
+                    <span className="rounded-md bg-ink px-2 py-0.5 text-[11px] font-bold text-white">
+                      نفذت الكمية
                     </span>
                   )}
-                  {withCategory && (
-                    <span className="mt-0.5 block text-xs text-muted-foreground">
-                      {item.category}
+                  {!soldOut && item.discount && (
+                    <span className="rounded-md bg-ink px-2 py-0.5 text-[11px] font-bold text-white">
+                      خصم بالكود
                     </span>
                   )}
-                  {item.variables.length > 0 && (
-                    <span className="mt-0.5 block text-xs font-medium text-primary">
-                      اختاري {item.variables.map((v) => v.name).join(" و")}
-                    </span>
-                  )}
-                </span>
-              </button>
+                </div>
+                {!soldOut && (
+                  <button
+                    type="button"
+                    onClick={() => handleQuickAdd(item)}
+                    aria-label={`أضيفي ${item.name} للسلة`}
+                    className={`absolute bottom-2 left-2 flex h-10 min-w-10 items-center justify-center gap-1 rounded-full px-2.5 text-sm font-bold shadow-[0_6px_16px_-6px_rgba(0,0,0,0.45)] transition-colors ${
+                      limitHit === item.id
+                        ? "bg-card text-muted-foreground"
+                        : justAdded === item.id
+                          ? "bg-ink text-white"
+                          : "bg-primary text-primary-foreground"
+                    }`}
+                  >
+                    {limitHit === item.id ? (
+                      <span className="px-1 text-xs">المتوفر {remainingFor(item.id)} فقط</span>
+                    ) : justAdded === item.id ? (
+                      <Check className="h-5 w-5" strokeWidth={3} />
+                    ) : (
+                      <Plus className="h-5 w-5" strokeWidth={3} />
+                    )}
+                  </button>
+                )}
+              </div>
 
               <button
                 type="button"
-                onClick={() => handleQuickAdd(item)}
-                disabled={soldOut}
-                aria-label={soldOut ? `${item.name}: نفذت الكمية` : `أضيفي ${item.name} للسلة`}
-                className={`flex h-11 shrink-0 items-center gap-1.5 rounded-full px-4 font-extrabold transition-colors ${
-                  soldOut || limitHit === item.id
-                    ? "bg-muted text-muted-foreground"
-                    : justAdded === item.id
-                      ? "bg-ink text-white"
-                      : "bg-primary text-primary-foreground hover:bg-accent-foreground"
-                }`}
+                onClick={() => setSheetItem(item)}
+                className="mt-2.5 block w-full text-start"
               >
-                {soldOut ? (
-                  <span className="text-sm">نفذت</span>
-                ) : limitHit === item.id ? (
-                  <span className="text-sm">المتوفر {item.stock} فقط</span>
-                ) : justAdded === item.id ? (
-                  <>
-                    <Check className="h-4 w-4" strokeWidth={3} />
-                    <span className="text-sm">أضيفت</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="text-[17px] leading-none">{formatPrice(item.price)}</span>
-                    <span className="text-[11px] leading-none">د.ل</span>
-                    <Plus className="h-4 w-4" strokeWidth={3} />
-                  </>
+                <span className="line-clamp-2 block text-[15px] leading-6 font-bold text-ink">
+                  {item.name}
+                </span>
+                {withCategory && (
+                  <span className="block text-xs text-muted-foreground">{item.category}</span>
                 )}
+                {firstVariable && (
+                  <span className="block text-sm text-muted-foreground">
+                    {firstVariable.name}:{" "}
+                    {arCount(firstVariable.values.length, [
+                      "خيار واحد",
+                      "خياران",
+                      "خيارات",
+                      "خيار",
+                    ])}
+                  </span>
+                )}
+                {item.min_qty > 1 && (
+                  <span className="block text-xs font-medium text-accent-foreground">
+                    أقل كمية: {item.min_qty}
+                  </span>
+                )}
+                <span className="mt-1 block text-[17px] font-extrabold text-ink">
+                  {formatPrice(item.price)} <span className="text-xs font-bold">د.ل</span>
+                </span>
               </button>
             </li>
           );
@@ -293,7 +332,7 @@ function Home() {
             type="button"
             dir="ltr"
             onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-            className="font-wordmark text-[26px] leading-none tracking-wide text-primary"
+            className="font-logo text-[22px] leading-none font-black tracking-tight text-primary"
           >
             GLAMOUR
           </button>
@@ -332,15 +371,15 @@ function Home() {
         <div className="mx-auto grid max-w-5xl gap-12 px-5 pt-12 pb-16 md:grid-cols-[1.15fr_1fr] md:items-center md:pb-20">
           <div>
             <p className="text-[15px] font-medium text-white/90">{story.hero_title}</p>
-            <h1
-              dir="ltr"
-              className="font-wordmark mt-2 text-right text-[clamp(3.5rem,21vw,8.5rem)] leading-[0.86] font-normal whitespace-nowrap"
-            >
-              GLAMOUR
+            {/* set like the logo: heavy GLAMOUR, signature "With Jannat" tucked under it */}
+            <h1 dir="ltr" className="mt-3 text-right">
+              <span className="font-logo block text-[clamp(2.6rem,15.5vw,4.25rem)] leading-[0.95] font-black tracking-tight whitespace-nowrap md:text-[6.5vw] lg:text-[5.25rem]">
+                GLAMOUR
+              </span>
+              <span className="font-script -mt-1 block text-[clamp(2.25rem,11vw,3.25rem)] leading-none font-normal text-white/95 md:text-6xl">
+                With Jannat
+              </span>
             </h1>
-            <p dir="ltr" className="mt-1 text-right text-xl font-medium text-white/90">
-              with Jannat
-            </p>
             <p className="mt-6 max-w-md text-[17px] leading-8 text-white/90">
               {story.hero_subtitle}
             </p>
@@ -363,7 +402,10 @@ function Home() {
                 />
               </div>
               <div className="flex items-center justify-between px-3 pb-1">
-                <span dir="ltr" className="font-wordmark text-sm tracking-wide text-primary">
+                <span
+                  dir="ltr"
+                  className="font-logo text-xs font-black tracking-tight text-primary"
+                >
                   GLAMOUR
                 </span>
                 <span className="text-xs text-muted-foreground">عروضنا</span>
@@ -447,7 +489,7 @@ function Home() {
                 <p className="text-sm text-muted-foreground">
                   {arCount(results.length, ["نتيجة واحدة", "نتيجتان", "نتائج", "نتيجة"])}
                 </p>
-                {renderProductList(results, true)}
+                {renderProductGrid(results, true)}
               </>
             ) : (
               <div className="py-12 text-center">
@@ -467,7 +509,7 @@ function Home() {
           ) : activeCategory ? (
             <>
               <h2 className="text-2xl text-ink">{activeCategory.name}</h2>
-              {renderProductList(activeCategory.items)}
+              {renderProductGrid(activeCategory.items)}
             </>
           ) : (
             <>
@@ -519,15 +561,29 @@ function Home() {
 
       {/* contact */}
       <footer className="bg-ink px-5 pt-14 pb-10 text-center text-white">
-        <h2 className="text-2xl">تواصلي معنا</h2>
+        <h2 className="text-2xl">تواصلوا معنا عبر الواتساب</h2>
         <a
-          href="tel:0918640785"
-          dir="ltr"
-          className="mt-3 inline-block text-2xl font-bold tracking-wide hover:text-primary-soft"
+          href={`https://wa.me/${WHATSAPP_NUMBER}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-4 inline-flex items-center gap-2.5 rounded-full bg-white/10 px-6 py-3 text-xl font-bold transition-colors hover:bg-white/15"
         >
-          0918640785
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden
+            className="h-6 w-6"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M3.5 20.5 4.8 16A8.5 8.5 0 1 1 8 19.3Z" />
+            <path d="M9.2 8.3c.3-.5.8-.5 1.1 0l.8 1.4c.2.3.1.7-.1 1l-.5.5c.5 1.1 1.4 2 2.5 2.5l.5-.5c.3-.2.7-.3 1-.1l1.4.8c.5.3.5.8 0 1.1-1 .9-2.4.9-3.6.2a9 9 0 0 1-3.3-3.3c-.7-1.2-.7-2.6.2-3.4Z" />
+          </svg>
+          <span dir="ltr">0918640785</span>
         </a>
-        <p className="mt-2 text-white/75">ليبيا، طرابلس - توصيل جميع أنحاء ليبيا</p>
+        <p className="mt-4 text-white/75">ليبيا، طرابلس - توصيل جميع أنحاء ليبيا</p>
         <SocialLinks className="mt-6" />
         <button
           type="button"
@@ -560,6 +616,10 @@ function Home() {
                 <div className="mt-5 space-y-4">
                   {lines.map((l) => {
                     const stock = productById.get(l.id)?.stock;
+                    const min = minOf(l.id);
+                    const afterMinus = qtyOfProduct(l.id) - 1;
+                    const canMinus = afterMinus === 0 || afterMinus >= min;
+                    const problem = lineProblem(l);
                     return (
                       <div key={l.key} className="flex items-center gap-3">
                         {l.image_url && (
@@ -576,23 +636,37 @@ function Home() {
                               {optionsLabel(l.options)}
                             </p>
                           )}
-                          <p className="text-sm text-muted-foreground">{l.price.toFixed(2)} د.ل</p>
+                          {/* flex keeps each number its own run, so the old and new prices
+                              can't be merged by right-to-left reordering */}
+                          <p className="flex flex-wrap items-center gap-x-1.5 text-sm text-muted-foreground">
+                            {l.discount_code && l.regular_price !== undefined && (
+                              <span className="line-through">{l.regular_price.toFixed(2)}</span>
+                            )}
+                            <span>{l.price.toFixed(2)} د.ل</span>
+                            {l.discount_code && (
+                              <span className="rounded bg-accent px-1.5 py-0.5 text-[11px] font-bold text-accent-foreground">
+                                كود {l.discount_code}
+                              </span>
+                            )}
+                          </p>
                           {overStockIds.has(l.id) && (
                             <p className="text-xs text-destructive">
                               {stock === 0 ? "نفذت الكمية — يرجى إزالته" : `المتوفر ${stock} فقط`}
                             </p>
                           )}
-                          {staleKeys.has(l.key) && (
+                          {belowMinIds.has(l.id) && (
                             <p className="text-xs text-destructive">
-                              تغيّرت خيارات هذا المنتج، احذفيه وأضيفيه من جديد
+                              أقل كمية يمكن طلبها من هذا المنتج {min}
                             </p>
                           )}
+                          {problem && <p className="text-xs text-destructive">{problem}</p>}
                         </div>
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => setQty(l.key, l.qty - 1)}
+                            disabled={!canMinus}
                             aria-label="إنقاص"
-                            className="h-8 w-8 rounded-full bg-muted"
+                            className="h-8 w-8 rounded-full bg-muted disabled:opacity-40"
                           >
                             −
                           </button>
@@ -621,7 +695,7 @@ function Home() {
                   <span>الإجمالي</span>
                   <span>{total.toFixed(2)} د.ل</span>
                 </div>
-                {(overStockIds.size > 0 || staleKeys.size > 0) && (
+                {cartBlocked && (
                   <p className="mt-4 text-center text-sm text-destructive">
                     عدّلي الأصناف المحددة باللون الأحمر لإكمال الطلب
                   </p>
@@ -631,7 +705,7 @@ function Home() {
                     setCartOpen(false);
                     setBooking(true);
                   }}
-                  disabled={overStockIds.size > 0 || staleKeys.size > 0}
+                  disabled={cartBlocked}
                   className="mt-5 w-full rounded-full px-6 py-3 font-bold text-primary-foreground disabled:opacity-50"
                   style={{ backgroundImage: "var(--gradient-pink)" }}
                 >
@@ -646,6 +720,7 @@ function Home() {
       <ProductSheet
         item={sheetItem}
         remaining={sheetItem ? remainingFor(sheetItem.id) : null}
+        inCart={sheetItem ? qtyOfProduct(sheetItem.id) : 0}
         onClose={() => setSheetItem(null)}
         onAdd={handleSheetAdd}
       />
