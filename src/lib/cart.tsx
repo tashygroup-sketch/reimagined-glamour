@@ -12,11 +12,18 @@ export type CartLine = {
   qty: number;
   image_url?: string | null;
   options?: CartOption[];
+  // set when the line was added with a valid discount code; `price` is then the discounted
+  // price and `regular_price` the original one (shown struck through)
+  discount_code?: string;
+  regular_price?: number;
 };
 
-export function lineKey(id: string, options?: CartOption[]) {
-  if (!options || options.length === 0) return id;
-  return `${id}|${options.map((o) => `${o.name}=${o.value}`).join("|")}`;
+export function lineKey(id: string, options?: CartOption[], discountCode?: string) {
+  let key = id;
+  if (options && options.length > 0)
+    key += `|${options.map((o) => `${o.name}=${o.value}`).join("|")}`;
+  if (discountCode) key += `|code=${discountCode}`;
+  return key;
 }
 
 export function optionsLabel(options?: CartOption[]) {
@@ -50,7 +57,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
       setLines(
         parsed
           .filter((l) => typeof l.id === "string" && typeof l.qty === "number")
-          .map((l) => ({ ...(l as CartLine), key: l.key ?? lineKey(l.id!, l.options) })),
+          .map((l) => ({
+            ...(l as CartLine),
+            key: l.key ?? lineKey(l.id!, l.options, l.discount_code),
+          })),
       );
     } catch {
       /* ignore */
@@ -75,7 +85,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       qtyOfProduct: (id) => lines.filter((l) => l.id === id).reduce((s, l) => s + l.qty, 0),
       add: (line, qty = 1) =>
         setLines((prev) => {
-          const key = lineKey(line.id, line.options);
+          const key = lineKey(line.id, line.options, line.discount_code);
           const found = prev.find((l) => l.key === key);
           if (found) return prev.map((l) => (l.key === key ? { ...l, qty: l.qty + qty } : l));
           return [...prev, { ...line, key, qty }];

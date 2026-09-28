@@ -15,7 +15,8 @@ export function buildWhatsAppDraft(info: BookingInfo, lines: CartLine[], total: 
     ? lines
         .map((l) => {
           const opts = optionsLabel(l.options);
-          return `• ${l.name}${opts ? ` (${opts})` : ""} × ${l.qty} — ${(l.price * l.qty).toFixed(2)} د.ل`;
+          const code = l.discount_code ? ` [كود خصم: ${l.discount_code}]` : "";
+          return `• ${l.name}${opts ? ` (${opts})` : ""}${code} × ${l.qty} — ${(l.price * l.qty).toFixed(2)} د.ل`;
         })
         .join("\n")
     : "• لا توجد أصناف محددة (طلب خاص)";

@@ -87,7 +87,32 @@ export type MenuItem = {
   // null = stock not tracked (unlimited); 0 = sold out
   stock: number | null;
   variables: ProductVariant[];
+  // "أقل كمية يمكن طلبها" — 1 means no minimum
+  min_qty: number;
+  // Only whether a discount code exists and when it ends. The code and the discounted price
+  // never leave the server until a customer types the right code.
+  discount: { ends_at: string | null } | null;
 };
+
+export type AdminDiscount = {
+  product_id: string;
+  code: string;
+  discount_price: number;
+  ends_at: string | null;
+};
+
+// Codes match regardless of case, spaces, or Arabic-vs-Latin digits ("sale٢٠" = "SALE20").
+function normalizeCode(raw: string) {
+  return String(raw ?? "")
+    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/\s+/g, "")
+    .toUpperCase();
+}
+
+function isActive(endsAt: string | null) {
+  return endsAt === null || new Date(endsAt).getTime() > Date.now();
+}
 
 // PostgREST error codes for "that column doesn't exist (yet)". Lets the site keep working in
 // the window between shipping this code and running the matching database migration.
@@ -128,7 +153,13 @@ export type OrderRow = {
   delivery_date: string | null;
   notes: string | null;
   location_url: string | null;
-  items: { name: string; qty: number; price: number; options?: OrderOption[] }[];
+  items: {
+    name: string;
+    qty: number;
+    price: number;
+    options?: OrderOption[];
+    discount_code?: string;
+  }[];
   total: number;
   status: string;
   created_at: string;
@@ -158,14 +189,34 @@ async function adminClient(phone: string) {
 }
 
 const MENU_COLUMN_SETS = [
+  "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock,variables,min_qty",
   "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock,variables",
   "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock",
   "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available",
   "id,name,description,price,image_url,category,sort_order,is_available",
 ];
 
+// Which products currently have a discount code, and until when — read with the server's
+// admin key because the table isn't publicly readable. Any failure (table not created yet,
+// key missing) just means "no discounts"; it must never take the menu down.
+async function activeDiscountEnds(): Promise<Map<string, string | null>> {
+  try {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data, error } = await supabaseAdmin
+      .from("product_discounts")
+      .select("product_id,ends_at");
+    if (error) return new Map();
+    return new Map(
+      (data ?? []).filter((d) => isActive(d.ends_at)).map((d) => [d.product_id, d.ends_at]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
 export const getMenu = createServerFn({ method: "GET" }).handler(async () => {
   const client = publicClient();
+  const discountsPromise = activeDiscountEnds();
   for (const columns of MENU_COLUMN_SETS) {
     const { data, error } = await client
       .from("menu_items")
@@ -173,19 +224,54 @@ export const getMenu = createServerFn({ method: "GET" }).handler(async () => {
       .order("sort_order", { ascending: true });
     if (isMissingColumn(error)) continue;
     if (error) throw new Error(error.message);
-    return ((data ?? []) as unknown as (Partial<MenuItem> & { variables?: unknown })[]).map(
-      (row) => ({
-        ...row,
-        image_ratio: row.image_ratio ?? null,
-        extra_images: row.extra_images ?? [],
-        extra_image_ratios: row.extra_image_ratios ?? [],
-        stock: row.stock ?? null,
-        variables: normalizeVariables(row.variables),
-      }),
-    ) as MenuItem[];
+    const discounts = await discountsPromise;
+    return (
+      (data ?? []) as unknown as (Partial<MenuItem> & { variables?: unknown; min_qty?: number })[]
+    ).map((row) => ({
+      ...row,
+      image_ratio: row.image_ratio ?? null,
+      extra_images: row.extra_images ?? [],
+      extra_image_ratios: row.extra_image_ratios ?? [],
+      stock: row.stock ?? null,
+      variables: normalizeVariables(row.variables),
+      min_qty: Math.max(1, Math.floor(Number(row.min_qty) || 1)),
+      discount: discounts.has(row.id!) ? { ends_at: discounts.get(row.id!) ?? null } : null,
+    })) as MenuItem[];
   }
   throw new Error("تعذّر تحميل المنيو");
 });
+
+// Customer typed a code for one product. Returns the discounted price only on an exact match
+// that hasn't expired.
+export const checkDiscountCode = createServerFn({ method: "POST" })
+  .inputValidator((input: { id: string; code: string }) => input)
+  .handler(async ({ data }) => {
+    const code = normalizeCode(data.code);
+    if (!code || !data.id) return { ok: false as const, reason: "invalid" as const };
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: row } = await supabaseAdmin
+      .from("product_discounts")
+      .select("code,discount_price,ends_at")
+      .eq("product_id", data.id)
+      .maybeSingle();
+    if (!row || normalizeCode(row.code) !== code) {
+      return { ok: false as const, reason: "invalid" as const };
+    }
+    if (!isActive(row.ends_at)) return { ok: false as const, reason: "expired" as const };
+    return { ok: true as const, price: Number(row.discount_price), ends_at: row.ends_at };
+  });
+
+export const getDiscountsAdmin = createServerFn({ method: "POST" })
+  .inputValidator((input: { phone: string }) => input)
+  .handler(async ({ data }) => {
+    const db = await adminClient(data.phone);
+    const { data: rows, error } = await db
+      .from("product_discounts")
+      .select("product_id,code,discount_price,ends_at");
+    if (isMissingColumn(error)) return [] as AdminDiscount[];
+    if (error) throw new Error(error.message);
+    return (rows ?? []).map((r) => ({ ...r, discount_price: Number(r.discount_price) }));
+  });
 
 export const createOrder = createServerFn({ method: "POST" })
   .inputValidator(
@@ -195,7 +281,14 @@ export const createOrder = createServerFn({ method: "POST" })
       address: string;
       notes?: string;
       location_url?: string;
-      items: { id?: string; name: string; qty: number; price: number; options?: OrderOption[] }[];
+      items: {
+        id?: string;
+        name: string;
+        qty: number;
+        price: number;
+        options?: OrderOption[];
+        discount_code?: string;
+      }[];
       total: number;
     }) => input,
   )
@@ -221,49 +314,120 @@ export const createOrder = createServerFn({ method: "POST" })
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-    // Every product that has variables must arrive with one valid choice per variable. The
-    // site already enforces this before adding to the cart; checking again here means an old
-    // cart (or a variable the owner edited meanwhile) can't slip an incomplete order through.
-    // Runs before stock is deducted, so a refused order never touches stock.
+    // Everything the customer's browser sent is re-checked against the database here, before
+    // stock is touched: chosen options, minimum quantity, discount codes, and the price of
+    // every line. The WhatsApp message is written from the same cart, so a refused order
+    // means a wrong price can never reach the owner.
     const productIds = [...new Set(data.items.map((i) => i.id).filter((id): id is string => !!id))];
-    const cleanItems: {
+    type CleanItem = {
       id?: string;
       name: string;
       qty: number;
       price: number;
       options?: OrderOption[];
-    }[] = data.items.map((i) => ({
+      discount_code?: string;
+    };
+    const cleanItems: CleanItem[] = data.items.map((i) => ({
       ...(i.id ? { id: i.id } : {}),
       name: String(i.name ?? "").slice(0, 160),
       qty: Math.max(0, Math.floor(Number(i.qty) || 0)),
       price: Number(i.price) || 0,
     }));
+    if (cleanItems.some((i) => i.qty < 1)) throw new Error("الكمية غير صحيحة، يرجى تعديل السلة");
+
     if (productIds.length > 0) {
-      const { data: rows, error: varError } = await supabaseAdmin
-        .from("menu_items")
-        .select("id,name,variables")
-        .in("id", productIds);
-      if (varError && !isMissingColumn(varError)) throw new Error(varError.message);
-      const byId = new Map((rows ?? []).map((r) => [r.id, r]));
+      type ProductRow = {
+        id: string;
+        name: string;
+        price: number;
+        variables?: unknown;
+        min_qty?: number;
+      };
+      let rows: ProductRow[] = [];
+      for (const cols of [
+        "id,name,price,variables,min_qty",
+        "id,name,price,variables",
+        "id,name,price",
+      ]) {
+        const res = await supabaseAdmin.from("menu_items").select(cols).in("id", productIds);
+        if (isMissingColumn(res.error)) continue;
+        if (res.error) throw new Error(res.error.message);
+        rows = (res.data ?? []) as unknown as ProductRow[];
+        break;
+      }
+      const byId = new Map(rows.map((r) => [r.id, r]));
+
+      const codedIds = [
+        ...new Set(data.items.filter((i) => i.id && i.discount_code?.trim()).map((i) => i.id!)),
+      ];
+      const discounts = new Map<
+        string,
+        { code: string; discount_price: number; ends_at: string | null }
+      >();
+      if (codedIds.length > 0) {
+        const { data: drows } = await supabaseAdmin
+          .from("product_discounts")
+          .select("product_id,code,discount_price,ends_at")
+          .in("product_id", codedIds);
+        for (const d of drows ?? [])
+          discounts.set(d.product_id, { ...d, discount_price: Number(d.discount_price) });
+      }
+
+      const qtyByProduct = new Map<string, number>();
       data.items.forEach((item, idx) => {
         const row = item.id ? byId.get(item.id) : undefined;
         if (!row) return;
+        const clean = cleanItems[idx]!;
+        qtyByProduct.set(row.id, (qtyByProduct.get(row.id) ?? 0) + clean.qty);
+
+        // options
         const variables = normalizeVariables(row.variables);
-        if (variables.length === 0) return;
-        const chosen: OrderOption[] = [];
-        for (const v of variables) {
-          const pick = item.options?.find((o) => o.name === v.name);
-          if (!pick || !v.values.some((val) => val.label === pick.value)) {
+        if (variables.length > 0) {
+          const chosen: OrderOption[] = [];
+          for (const v of variables) {
+            const pick = item.options?.find((o) => o.name === v.name);
+            if (!pick || !v.values.some((val) => val.label === pick.value)) {
+              throw new Error(
+                pick
+                  ? `الخيار "${pick.value}" لم يعد متوفرًا في "${row.name}"، احذفيه من السلة وأضيفيه من جديد`
+                  : `اختاري ${v.name} للمنتج "${row.name}"`,
+              );
+            }
+            chosen.push({ name: v.name, value: pick.value });
+          }
+          clean.options = chosen;
+        }
+
+        // price: the discount price only with a valid, unexpired code; otherwise the regular one
+        let price = Number(row.price);
+        const typed = item.discount_code?.trim();
+        if (typed) {
+          const d = discounts.get(row.id);
+          if (!d || normalizeCode(d.code) !== normalizeCode(typed)) {
             throw new Error(
-              pick
-                ? `الخيار "${pick.value}" لم يعد متوفرًا في "${row.name}"، احذفيه من السلة وأضيفيه من جديد`
-                : `اختاري ${v.name} للمنتج "${row.name}"`,
+              `كود الخصم على "${row.name}" غير صحيح، احذفيه من السلة وأضيفيه من جديد`,
             );
           }
-          chosen.push({ name: v.name, value: pick.value });
+          if (!isActive(d.ends_at)) {
+            throw new Error(`انتهى الخصم على "${row.name}"، احذفيه من السلة وأضيفيه من جديد`);
+          }
+          price = d.discount_price;
+          clean.discount_code = d.code;
         }
-        cleanItems[idx]!.options = chosen;
+        if (Math.abs(price - clean.price) > 0.005) {
+          throw new Error(`تغيّر سعر "${row.name}"، احذفيه من السلة وأضيفيه من جديد`);
+        }
+        clean.price = price;
       });
+
+      // minimum quantity counts all option lines of one product together
+      for (const [id, qty] of qtyByProduct) {
+        const row = byId.get(id)!;
+        const min = Math.max(1, Math.floor(Number(row.min_qty) || 1));
+        if (qty < min) {
+          throw new Error(`أقل كمية يمكن طلبها من "${row.name}" هي ${min}`);
+        }
+      }
     }
 
     // Deduct stock first, atomically: if any item doesn't have enough, nothing is deducted
@@ -298,7 +462,8 @@ export const createOrder = createServerFn({ method: "POST" })
       notes: data.notes?.trim().slice(0, 600) ?? null,
       location_url: data.location_url?.trim().slice(0, 300) ?? null,
       items: cleanItems,
-      total: data.total ?? 0,
+      // recomputed from the checked prices, not taken from the browser
+      total: Math.round(cleanItems.reduce((sum, i) => sum + i.price * i.qty, 0) * 100) / 100,
     };
     let result = await supabaseAdmin.from("orders").insert(payload).select("id").single();
     if (result.error?.code === "PGRST204") {
@@ -351,6 +516,9 @@ export const saveMenuItem = createServerFn({ method: "POST" })
         is_available?: boolean;
         stock?: number | null;
         variables?: ProductVariant[];
+        min_qty?: number;
+        // null/empty code = remove the product's discount
+        discount?: { code: string; discount_price: number; ends_at: string | null } | null;
       };
     }) => {
       if (!input.item?.name?.trim()) throw new Error("اسم الصنف مطلوب");
@@ -375,35 +543,89 @@ export const saveMenuItem = createServerFn({ method: "POST" })
           ? null
           : Math.max(0, Math.floor(Number(data.item.stock) || 0)),
       variables: sanitizeVariables(data.item.variables),
+      min_qty: Math.min(999, Math.max(1, Math.floor(Number(data.item.min_qty) || 1))),
     };
-    const write = (row: Omit<Partial<typeof payload>, "name"> & { name: string }) =>
-      data.item.id
-        ? db.from("menu_items").update(row).eq("id", data.item.id)
-        : db.from("menu_items").insert(row);
 
-    let { error } = await write(payload);
-    if (isMissingColumn(error)) {
-      // A newer column hasn't been migrated onto the live database yet. Variables can't be
-      // dropped silently (the owner would think they saved), so ask for the migration.
-      if (payload.variables.length > 0) {
+    // Validate the discount before writing anything, so a bad discount doesn't leave the
+    // product half-saved.
+    const code = data.item.discount?.code?.trim().slice(0, 40) ?? "";
+    let discount: { code: string; discount_price: number; ends_at: string | null } | null = null;
+    if (code) {
+      const discountPrice = Number(data.item.discount?.discount_price);
+      if (!Number.isFinite(discountPrice) || discountPrice < 0) {
+        throw new Error("اكتبي سعر الخصم");
+      }
+      if (discountPrice >= payload.price) {
+        throw new Error("سعر الخصم يجب أن يكون أقل من السعر الأصلي");
+      }
+      const endsAt = data.item.discount?.ends_at ?? null;
+      if (endsAt !== null && Number.isNaN(new Date(endsAt).getTime())) {
+        throw new Error("وقت انتهاء الخصم غير صحيح");
+      }
+      discount = {
+        code,
+        discount_price: Math.round(discountPrice * 100) / 100,
+        ends_at: endsAt ? new Date(endsAt).toISOString() : null,
+      };
+    }
+
+    type Row = Omit<Partial<typeof payload>, "name"> & { name: string };
+    const write = async (row: Row) => {
+      if (data.item.id) {
+        const { error } = await db.from("menu_items").update(row).eq("id", data.item.id);
+        return { error, id: data.item.id };
+      }
+      const { data: inserted, error } = await db
+        .from("menu_items")
+        .insert(row)
+        .select("id")
+        .single();
+      return { error, id: inserted?.id as string | undefined };
+    };
+
+    let result = await write(payload);
+    if (isMissingColumn(result.error)) {
+      // A newer column hasn't been migrated onto the live database yet. Settings the owner
+      // actually used can't be dropped silently, so ask for the migration instead.
+      if (payload.variables.length > 0 || payload.min_qty > 1) {
         throw new Error(
-          "لحفظ المتغيرات شغّلي ملف تحديث قاعدة البيانات الجديد في Supabase (SQL Editor) أولاً",
+          "لحفظ المتغيرات أو أقل كمية شغّلي ملفات تحديث قاعدة البيانات الجديدة في Supabase (SQL Editor) أولاً",
         );
       }
-      const { variables: _variables, ...withoutVariables } = payload;
-      ({ error } = await write(withoutVariables));
-      if (isMissingColumn(error)) {
+      const { variables: _variables, min_qty: _minQty, ...older } = payload;
+      result = await write(older);
+      if (isMissingColumn(result.error)) {
         const {
           extra_images: _extraImages,
           extra_image_ratios: _ratios,
           image_ratio: _ratio,
           stock: _stock,
           ...rest
-        } = withoutVariables;
-        ({ error } = await write(rest));
+        } = older;
+        result = await write(rest);
       }
     }
-    if (error) throw new Error(error.message);
+    if (result.error) throw new Error(result.error.message);
+
+    const productId = result.id;
+    if (productId) {
+      const { error: discountError } = discount
+        ? await db
+            .from("product_discounts")
+            .upsert(
+              { product_id: productId, ...discount, updated_at: new Date().toISOString() },
+              { onConflict: "product_id" },
+            )
+        : await db.from("product_discounts").delete().eq("product_id", productId);
+      if (discountError) {
+        if (!isMissingColumn(discountError)) throw new Error(discountError.message);
+        if (discount) {
+          throw new Error(
+            "تم حفظ المنتج، لكن لحفظ كود الخصم شغّلي ملف تحديث قاعدة البيانات الجديد في Supabase أولاً",
+          );
+        }
+      }
+    }
     return { ok: true };
   });
 
