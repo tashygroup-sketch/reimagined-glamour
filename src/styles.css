@@ -34,8 +34,10 @@
   --color-ink: var(--ink);
   --font-display: "Tajawal", system-ui, sans-serif;
   --font-body: "Tajawal", system-ui, sans-serif;
-  /* the giant GLAMOUR wordmark only (Latin, condensed, heavy) */
-  --font-wordmark: "Anton", "Tajawal", "Arial Narrow", sans-serif;
+  /* logo lettering. The logo uses Gotham Black and Brittany Signature (both paid fonts);
+     Montserrat Black and Ms Madi are the closest free matches on Google Fonts. */
+  --font-logo: "Montserrat", "Tajawal", system-ui, sans-serif;
+  --font-script: "Ms Madi", "Segoe Script", cursive;
 }
 
 :root {
