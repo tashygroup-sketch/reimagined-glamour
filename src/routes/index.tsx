@@ -2,7 +2,13 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Check, Plus, Search, ShoppingBag, X } from "lucide-react";
-import { getCategories, getMenu, getStorySection, type MenuItem } from "@/lib/shop.functions";
+import {
+  effectivePrice,
+  getCategories,
+  getMenu,
+  getStorySection,
+  type MenuItem,
+} from "@/lib/shop.functions";
 import { LogoIntro } from "@/components/LogoIntro";
 import { Carousel } from "@/components/Carousel";
 import { BookingDialog } from "@/components/BookingDialog";
@@ -128,7 +134,7 @@ function Home() {
       if (!d || (d.ends_at && new Date(d.ends_at).getTime() <= Date.now())) {
         return "انتهى الخصم على هذا المنتج، احذفيه وأضيفيه من جديد";
       }
-    } else if (Math.abs(l.price - Number(product.price)) > 0.005) {
+    } else if (Math.abs(l.price - effectivePrice(product)) > 0.005) {
       return "تغيّر سعر هذا المنتج، احذفيه وأضيفيه من جديد";
     }
     return null;
@@ -159,7 +165,13 @@ function Home() {
       return;
     }
     add(
-      { id: item.id, name: item.name, price: Number(item.price), image_url: item.image_url },
+      {
+        id: item.id,
+        name: item.name,
+        price: effectivePrice(item),
+        image_url: item.image_url,
+        ...(item.sale_price !== null ? { regular_price: Number(item.price) } : {}),
+      },
       qty,
     );
     flash(setJustAdded, item.id, 1100);
@@ -179,10 +191,11 @@ function Home() {
       {
         id: item.id,
         name: item.name,
-        price: discount ? discount.price : Number(item.price),
+        price: discount ? discount.price : effectivePrice(item),
         image_url: valueImage ?? item.image_url,
         options,
-        ...(discount ? { discount_code: discount.code, regular_price: Number(item.price) } : {}),
+        ...(discount ? { discount_code: discount.code } : {}),
+        ...(discount || item.sale_price !== null ? { regular_price: Number(item.price) } : {}),
       },
       qty,
     );
@@ -253,6 +266,11 @@ function Home() {
                       نفذت الكمية
                     </span>
                   )}
+                  {!soldOut && item.sale_price !== null && (
+                    <span className="rounded-md bg-primary px-2 py-0.5 text-[11px] font-bold text-primary-foreground">
+                      خصم {Math.round((1 - item.sale_price / Number(item.price)) * 100)}%
+                    </span>
+                  )}
                   {!soldOut && item.discount && (
                     <span className="rounded-md bg-ink px-2 py-0.5 text-[11px] font-bold text-white">
                       خصم بالكود
@@ -310,8 +328,19 @@ function Home() {
                     أقل كمية: {item.min_qty}
                   </span>
                 )}
-                <span className="mt-1 block text-[17px] font-extrabold text-ink">
-                  {formatPrice(item.price)} <span className="text-xs font-bold">د.ل</span>
+                {/* flex keeps the two numbers apart under right-to-left reordering */}
+                <span className="mt-1 flex flex-wrap items-baseline gap-x-2">
+                  <span
+                    className={`text-[17px] font-extrabold ${item.sale_price !== null ? "text-primary" : "text-ink"}`}
+                  >
+                    {formatPrice(effectivePrice(item))}{" "}
+                    <span className="text-xs font-bold">د.ل</span>
+                  </span>
+                  {item.sale_price !== null && (
+                    <span className="text-sm text-muted-foreground line-through">
+                      {formatPrice(item.price)}
+                    </span>
+                  )}
                 </span>
               </button>
             </li>
@@ -639,7 +668,7 @@ function Home() {
                           {/* flex keeps each number its own run, so the old and new prices
                               can't be merged by right-to-left reordering */}
                           <p className="flex flex-wrap items-center gap-x-1.5 text-sm text-muted-foreground">
-                            {l.discount_code && l.regular_price !== undefined && (
+                            {l.regular_price !== undefined && l.regular_price > l.price && (
                               <span className="line-through">{l.regular_price.toFixed(2)}</span>
                             )}
                             <span>{l.price.toFixed(2)} د.ل</span>
