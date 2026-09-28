@@ -2,12 +2,14 @@ import { createServerFn } from "@tanstack/react-start";
 import { createClient } from "@supabase/supabase-js";
 import { imageSize } from "image-size";
 import type { Database } from "@/integrations/supabase/types";
+import { hasValueStock, parseStock, totalFromValues } from "@/lib/stock";
 
 export const WHATSAPP_NUMBER = "218918640785";
 
-// A product's own options, e.g. { name: "اللون", values: [{ label: "أحمر", image_url }] }.
+// A product's own options, e.g. { name: "اللون", values: [{ label: "أحمر", image_url, stock }] }.
 // When a product has any, the customer must pick one value from each before ordering.
-export type VariantValue = { label: string; image_url: string | null };
+// `stock` = pieces of that value left; null = not counted (unlimited). See src/lib/stock.ts.
+export type VariantValue = { label: string; image_url: string | null; stock: number | null };
 export type ProductVariant = { name: string; values: VariantValue[] };
 export type OrderOption = { name: string; value: string };
 
@@ -21,13 +23,14 @@ export function normalizeVariables(raw: unknown): ProductVariant[] {
     const values: VariantValue[] = Array.isArray(v?.values)
       ? v.values
           .map((x: unknown) => {
-            const val = x as { label?: unknown; image_url?: unknown };
+            const val = x as { label?: unknown; image_url?: unknown; stock?: unknown };
             return {
               label: typeof val?.label === "string" ? val.label.trim() : "",
               image_url:
                 typeof val?.image_url === "string" && val.image_url.trim()
                   ? val.image_url.trim()
                   : null,
+              stock: typeof val?.stock === "number" ? parseStock(val.stock) : null,
             };
           })
           .filter((x: VariantValue) => x.label)
@@ -60,7 +63,7 @@ function sanitizeVariables(input: unknown): ProductVariant[] {
         typeof val?.image_url === "string" && val.image_url.trim()
           ? val.image_url.trim().slice(0, 500)
           : null;
-      values.push({ label, image_url: image });
+      values.push({ label, image_url: image, stock: parseStock(val?.stock) });
     }
     if (!name && values.length === 0) continue;
     if (!name) throw new Error("اكتبي اسم المتغير (مثل: اللون)");
@@ -199,6 +202,11 @@ function publicClient() {
     },
   });
 }
+
+// Newer stock function (supabase/migrations/20260928190000_value_stock.sql): same job as
+// reserve_stock, plus each chosen value's own quantity. Typed as the old name because the
+// generated database types only list that one; the arguments are the same shape.
+const RESERVE_V2 = "reserve_stock_v2" as "reserve_stock";
 
 async function adminClient(phone: string) {
   const { isAdminPhone } = await import("@/lib/admin.server");
@@ -464,14 +472,19 @@ export const createOrder = createServerFn({ method: "POST" })
     }
 
     // Deduct stock first, atomically: if any item doesn't have enough, nothing is deducted
-    // and the order is refused before WhatsApp ever opens.
-    const stockItems = data.items
+    // and the order is refused before WhatsApp ever opens. The checked options go along so
+    // each chosen value's own quantity goes down too.
+    const stockItems = cleanItems
       .filter((i) => typeof i.id === "string" && i.id.length > 0)
-      .map((i) => ({ id: i.id, qty: Math.max(0, Math.floor(Number(i.qty) || 0)) }));
+      .map((i) => ({ id: i.id!, qty: i.qty, options: i.options ?? [] }));
     if (stockItems.length > 0) {
-      const { error: stockError } = await supabaseAdmin.rpc("reserve_stock", {
-        p_items: stockItems,
-      });
+      let { error: stockError } = await supabaseAdmin.rpc(RESERVE_V2, { p_items: stockItems });
+      if (stockError?.code === "PGRST202") {
+        // Newer function not installed yet: the older one still handles product totals.
+        ({ error: stockError } = await supabaseAdmin.rpc("reserve_stock", {
+          p_items: stockItems,
+        }));
+      }
       if (stockError) {
         const outOfStock = /OUT_OF_STOCK:(.+)$/.exec(stockError.message);
         if (outOfStock) {
@@ -561,6 +574,19 @@ export const saveMenuItem = createServerFn({ method: "POST" })
   )
   .handler(async ({ data }) => {
     const db = await adminClient(data.phone);
+    const variables = sanitizeVariables(data.item.variables);
+    const valueStock = hasValueStock(variables);
+    if (valueStock) {
+      // Quantities per value are only safe once the database can deduct them on each order.
+      // Calling the function with an empty order changes nothing; it only proves it exists.
+      const { error: fnError } = await db.rpc(RESERVE_V2, { p_items: [] });
+      if (fnError?.code === "PGRST202") {
+        throw new Error(
+          "لحفظ كمية لكل قيمة شغّلي ملف تحديث قاعدة البيانات الجديد (value_stock) في Supabase أولاً",
+        );
+      }
+      if (fnError) throw new Error(fnError.message);
+    }
     const payload = {
       name: data.item.name.trim().slice(0, 120),
       description: data.item.description?.trim().slice(0, 500) ?? null,
@@ -572,11 +598,13 @@ export const saveMenuItem = createServerFn({ method: "POST" })
       category: data.item.category?.trim().slice(0, 60) || "مكياج",
       sort_order: Number(data.item.sort_order) || 0,
       is_available: data.item.is_available ?? true,
-      stock:
-        data.item.stock === null || data.item.stock === undefined
+      // With quantities per value, the total is calculated from them (never typed by hand).
+      stock: valueStock
+        ? totalFromValues(variables)
+        : data.item.stock === null || data.item.stock === undefined
           ? null
           : Math.max(0, Math.floor(Number(data.item.stock) || 0)),
-      variables: sanitizeVariables(data.item.variables),
+      variables,
       min_qty: Math.min(999, Math.max(1, Math.floor(Number(data.item.min_qty) || 1))),
       sale_price: parseSalePrice(data.item.sale_price, Number(data.item.price) || 0),
     };
