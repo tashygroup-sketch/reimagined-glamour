@@ -128,6 +128,7 @@ export function MenuPanel({ phone }: { phone: string }) {
             name: draft.name,
             description: draft.description,
             price: Number(draft.price) || 0,
+            sale_price: draft.sale_price.trim() ? Number(draft.sale_price) : null,
             image_url: draft.image_url,
             image_ratio: draft.image_ratio,
             extra_images: draft.extra_images,
@@ -318,8 +319,15 @@ export function MenuPanel({ phone }: { phone: string }) {
                           </span>
                         ) : null}
                       </div>
-                      <p className="mt-1 font-bold text-primary">
-                        {Number(item.price).toFixed(2)} د.ل
+                      <p className="mt-1 flex flex-wrap items-baseline gap-x-2">
+                        <span className="font-bold text-primary">
+                          {Number(item.sale_price ?? item.price).toFixed(2)} د.ل
+                        </span>
+                        {item.sale_price !== null && (
+                          <span className="text-sm text-muted-foreground line-through">
+                            {Number(item.price).toFixed(2)}
+                          </span>
+                        )}
                       </p>
                       {item.min_qty > 1 && (
                         <p className="mt-1 text-xs text-muted-foreground">

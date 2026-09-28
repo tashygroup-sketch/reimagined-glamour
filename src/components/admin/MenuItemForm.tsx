@@ -8,6 +8,8 @@ export type MenuItemDraft = {
   name: string;
   description: string;
   price: string;
+  // "" = no regular discount
+  sale_price: string;
   category: string;
   // Set automatically: end of the chosen category (not shown to the admin).
   sort_order: string;
@@ -44,6 +46,7 @@ const empty: MenuItemDraft = {
   name: "",
   description: "",
   price: "",
+  sale_price: "",
   category: "",
   sort_order: "0",
   image_url: "",
@@ -117,6 +120,10 @@ export function MenuItemForm({
           name: initial.name,
           description: initial.description ?? "",
           price: String(initial.price),
+          sale_price:
+            initial.sale_price !== null && initial.sale_price !== undefined
+              ? String(initial.sale_price)
+              : "",
           category: initial.category,
           sort_order: String(initial.sort_order),
           image_url: initial.image_url ?? "",
@@ -134,6 +141,7 @@ export function MenuItemForm({
   );
   const [variablesError, setVariablesError] = useState<string | null>(null);
   const [discountError, setDiscountError] = useState<string | null>(null);
+  const [priceError, setPriceError] = useState<string | null>(null);
   const [uploadingValue, setUploadingValue] = useState<string | null>(null);
   const [addingCategory, setAddingCategory] = useState(categories.length === 0);
   const [newCategoryName, setNewCategoryName] = useState("");
@@ -266,14 +274,19 @@ export function MenuItemForm({
           setVariablesError(problem);
           return;
         }
+        const sale = draft.sale_price.trim() ? Number(draft.sale_price) : null;
+        if (sale !== null && (!Number.isFinite(sale) || sale < 0 || sale >= Number(draft.price))) {
+          setPriceError("السعر بعد الخصم يجب أن يكون أقل من السعر الأصلي");
+          return;
+        }
         if (draft.discount_code.trim()) {
           const dp = Number(draft.discount_price);
           if (draft.discount_price.trim() === "" || !Number.isFinite(dp) || dp < 0) {
-            setDiscountError("اكتبي سعر الخصم");
+            setDiscountError("اكتبي السعر مع الكود");
             return;
           }
-          if (dp >= Number(draft.price)) {
-            setDiscountError("سعر الخصم يجب أن يكون أقل من السعر الأصلي");
+          if (dp >= (sale ?? Number(draft.price))) {
+            setDiscountError("السعر مع الكود يجب أن يكون أقل من سعر المنتج الحالي");
             return;
           }
         }
@@ -294,8 +307,30 @@ export function MenuItemForm({
           type="number"
           step="0.01"
           value={draft.price}
-          onChange={(v) => setDraft((d) => ({ ...d, price: v }))}
+          onChange={(v) => {
+            setPriceError(null);
+            setDraft((d) => ({ ...d, price: v }));
+          }}
         />
+        <Field
+          label="السعر بعد الخصم (اختياري)"
+          type="number"
+          step="0.01"
+          value={draft.sale_price}
+          onChange={(v) => {
+            setPriceError(null);
+            setDraft((d) => ({ ...d, sale_price: v }));
+          }}
+        />
+        <p className="-mt-1 text-xs leading-5 text-muted-foreground sm:col-span-2">
+          {priceError ? (
+            <span className="text-destructive">{priceError}</span>
+          ) : draft.sale_price.trim() && Number(draft.sale_price) < Number(draft.price) ? (
+            `يرى الجميع ${draft.price} مشطوبًا والسعر ${draft.sale_price} د.ل (خصم ${Math.round((1 - Number(draft.sale_price) / Number(draft.price)) * 100)}%) بدون كود`
+          ) : (
+            "اتركيه فارغًا إذا لا يوجد خصم"
+          )}
+        </p>
 
         {/* div, not label: a label forwards taps to the first button inside it */}
         <div>
@@ -464,7 +499,7 @@ export function MenuItemForm({
         {draft.discount_code.trim() ? (
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <label className="block">
-              <span className="mb-1 block text-sm text-muted-foreground">سعر الخصم (د.ل)</span>
+              <span className="mb-1 block text-sm text-muted-foreground">السعر مع الكود (د.ل)</span>
               <input
                 type="number"
                 step="0.01"
