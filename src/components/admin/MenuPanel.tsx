@@ -4,10 +4,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   getMenu,
   getCategories,
+  getDiscountsAdmin,
   saveCategoryImage,
   saveMenuItem,
   deleteMenuItem,
   uploadMenuImage,
+  type AdminDiscount,
   type CategoryInfo,
   type MenuItem,
 } from "@/lib/shop.functions";
@@ -24,10 +26,12 @@ export function MenuPanel({ phone }: { phone: string }) {
   const upload = useServerFn(uploadMenuImage);
   const fetchCategories = useServerFn(getCategories);
   const setCategoryImage = useServerFn(saveCategoryImage);
+  const fetchDiscounts = useServerFn(getDiscountsAdmin);
   const queryClient = useQueryClient();
 
   const [items, setItems] = useState<MenuItem[] | null>(null);
   const [categoryInfo, setCategoryInfo] = useState<CategoryInfo[]>([]);
+  const [discounts, setDiscounts] = useState<AdminDiscount[]>([]);
   const [categoryCrop, setCategoryCrop] = useState<{ file: File; name: string } | null>(null);
   const [categoryBusy, setCategoryBusy] = useState<string | null>(null);
   const [categoryError, setCategoryError] = useState<string | null>(null);
@@ -37,9 +41,14 @@ export function MenuPanel({ phone }: { phone: string }) {
 
   async function load() {
     try {
-      const [rows, cats] = await Promise.all([fetchMenu(), fetchCategories()]);
+      const [rows, cats, codes] = await Promise.all([
+        fetchMenu(),
+        fetchCategories(),
+        fetchDiscounts({ data: { phone } }).catch(() => [] as AdminDiscount[]),
+      ]);
       setItems(rows);
       setCategoryInfo(cats);
+      setDiscounts(codes);
     } catch (err) {
       setError(err instanceof Error ? err.message : "تعذّر تحميل المنيو");
     }
@@ -130,6 +139,15 @@ export function MenuPanel({ phone }: { phone: string }) {
               name: v.name,
               values: v.values.filter((x) => x.label.trim()),
             })),
+            min_qty: Math.max(1, Math.floor(Number(draft.min_qty) || 1)),
+            discount: draft.discount_code.trim()
+              ? {
+                  code: draft.discount_code.trim(),
+                  discount_price: Number(draft.discount_price),
+                  // datetime-local is the admin's local time; toISOString stores it exactly
+                  ends_at: draft.discount_ends ? new Date(draft.discount_ends).toISOString() : null,
+                }
+              : null,
           },
         },
       });
@@ -261,6 +279,7 @@ export function MenuPanel({ phone }: { phone: string }) {
                   <MenuItemForm
                     key={item.id}
                     initial={item}
+                    initialDiscount={discounts.find((d) => d.product_id === item.id) ?? null}
                     categories={categories}
                     busy={busy}
                     onCancel={() => setEditing(null)}
@@ -302,6 +321,27 @@ export function MenuPanel({ phone }: { phone: string }) {
                       <p className="mt-1 font-bold text-primary">
                         {Number(item.price).toFixed(2)} د.ل
                       </p>
+                      {item.min_qty > 1 && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          أقل كمية: {item.min_qty}
+                        </p>
+                      )}
+                      {(() => {
+                        const d = discounts.find((x) => x.product_id === item.id);
+                        if (!d) return null;
+                        const ended =
+                          d.ends_at !== null && new Date(d.ends_at).getTime() <= Date.now();
+                        return (
+                          <p
+                            className={`mt-1 text-xs ${ended ? "text-muted-foreground line-through" : "text-accent-foreground"}`}
+                          >
+                            كود {d.code}: {d.discount_price.toFixed(2)} د.ل
+                            {d.ends_at
+                              ? ` — ${ended ? "انتهى" : "حتى"} ${new Date(d.ends_at).toLocaleString("ar-LY", { dateStyle: "short", timeStyle: "short" })}`
+                              : ""}
+                          </p>
+                        );
+                      })()}
                       {item.variables.length > 0 && (
                         <p className="mt-1 text-xs text-muted-foreground">
                           {item.variables

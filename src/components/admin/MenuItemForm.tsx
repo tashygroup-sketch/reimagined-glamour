@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { MenuItem, ProductVariant } from "@/lib/shop.functions";
+import type { AdminDiscount, MenuItem, ProductVariant } from "@/lib/shop.functions";
 import { CropDialog, type CroppedImage } from "./CropDialog";
 import { CategorySelect } from "./CategorySelect";
 
@@ -18,7 +18,20 @@ export type MenuItemDraft = {
   // "" = not tracked (unlimited)
   stock: string;
   variables: VariableDraft[];
+  min_qty: string;
+  // "" = no discount. When a code is typed, the price and end time fields appear.
+  discount_code: string;
+  discount_price: string;
+  // <input type="datetime-local"> value in the admin's own time zone; "" = no end time
+  discount_ends: string;
 };
+
+// ISO time → "YYYY-MM-DDTHH:mm" in this browser's time zone, for datetime-local inputs.
+function toLocalInput(iso: string | null | undefined) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
 
 export type VariableDraft = {
   name: string;
@@ -39,6 +52,10 @@ const empty: MenuItemDraft = {
   extra_image_ratios: [],
   stock: "",
   variables: [],
+  min_qty: "1",
+  discount_code: "",
+  discount_price: "",
+  discount_ends: "",
 };
 
 function toDraftVariables(variables: ProductVariant[] | undefined): VariableDraft[] {
@@ -76,6 +93,7 @@ function toDigits(raw: string) {
 
 export function MenuItemForm({
   initial,
+  initialDiscount,
   categories,
   busy,
   onCancel,
@@ -84,6 +102,7 @@ export function MenuItemForm({
   nextSortOrderFor,
 }: {
   initial?: MenuItem | null;
+  initialDiscount?: AdminDiscount | null;
   categories: string[];
   busy: boolean;
   onCancel: () => void;
@@ -106,10 +125,15 @@ export function MenuItemForm({
           extra_image_ratios: initial.extra_image_ratios ?? [],
           stock: initial.stock === null || initial.stock === undefined ? "" : String(initial.stock),
           variables: toDraftVariables(initial.variables),
+          min_qty: String(initial.min_qty ?? 1),
+          discount_code: initialDiscount?.code ?? "",
+          discount_price: initialDiscount ? String(initialDiscount.discount_price) : "",
+          discount_ends: toLocalInput(initialDiscount?.ends_at),
         }
       : empty,
   );
   const [variablesError, setVariablesError] = useState<string | null>(null);
+  const [discountError, setDiscountError] = useState<string | null>(null);
   const [uploadingValue, setUploadingValue] = useState<string | null>(null);
   const [addingCategory, setAddingCategory] = useState(categories.length === 0);
   const [newCategoryName, setNewCategoryName] = useState("");
@@ -242,6 +266,17 @@ export function MenuItemForm({
           setVariablesError(problem);
           return;
         }
+        if (draft.discount_code.trim()) {
+          const dp = Number(draft.discount_price);
+          if (draft.discount_price.trim() === "" || !Number.isFinite(dp) || dp < 0) {
+            setDiscountError("اكتبي سعر الخصم");
+            return;
+          }
+          if (dp >= Number(draft.price)) {
+            setDiscountError("سعر الخصم يجب أن يكون أقل من السعر الأصلي");
+            return;
+          }
+        }
         onSubmit(draft);
       }}
       className="space-y-4 rounded-3xl bg-card p-5 shadow-[var(--shadow-card)]"
@@ -356,6 +391,50 @@ export function MenuItemForm({
             </button>
           )}
         </div>
+
+        <div>
+          <span className="mb-1 block text-sm text-muted-foreground">أقل كمية يمكن طلبها</span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                setDraft((d) => ({ ...d, min_qty: String(Math.max(1, Number(d.min_qty) - 1)) }))
+              }
+              disabled={Number(draft.min_qty) <= 1}
+              aria-label="إنقاص أقل كمية"
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-muted text-xl text-ink transition-opacity disabled:opacity-40"
+            >
+              −
+            </button>
+            <input
+              inputMode="numeric"
+              dir="ltr"
+              value={draft.min_qty}
+              onChange={(e) => setDraft((d) => ({ ...d, min_qty: toDigits(e.target.value) }))}
+              onBlur={() =>
+                setDraft((d) => ({ ...d, min_qty: String(Math.max(1, Number(d.min_qty) || 1)) }))
+              }
+              aria-label="أقل كمية يمكن طلبها"
+              className="h-12 w-full min-w-0 rounded-2xl border border-border bg-background px-2 text-center text-lg text-ink outline-none focus:border-primary"
+            />
+            <button
+              type="button"
+              onClick={() =>
+                setDraft((d) => ({ ...d, min_qty: String((Number(d.min_qty) || 1) + 1) }))
+              }
+              aria-label="زيادة أقل كمية"
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-xl text-primary-foreground"
+              style={{ backgroundImage: "var(--gradient-pink)" }}
+            >
+              +
+            </button>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {Number(draft.min_qty) > 1
+              ? `لن تستطيع الزبونة طلب أقل من ${draft.min_qty} من هذا المنتج`
+              : "1 = بدون حد أدنى"}
+          </p>
+        </div>
       </div>
 
       <label className="block">
@@ -367,6 +446,62 @@ export function MenuItemForm({
           className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
         />
       </label>
+
+      <div className="rounded-2xl border border-border p-4">
+        <label className="block">
+          <span className="text-sm font-bold text-ink">كود الخصم (اختياري)</span>
+          <input
+            dir="auto"
+            value={draft.discount_code}
+            placeholder="مثال: JANNAT10"
+            onChange={(e) => {
+              setDiscountError(null);
+              setDraft((d) => ({ ...d, discount_code: e.target.value }));
+            }}
+            className="mt-1 w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
+          />
+        </label>
+        {draft.discount_code.trim() ? (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-sm text-muted-foreground">سعر الخصم (د.ل)</span>
+              <input
+                type="number"
+                step="0.01"
+                inputMode="decimal"
+                dir="ltr"
+                value={draft.discount_price}
+                onChange={(e) => {
+                  setDiscountError(null);
+                  setDraft((d) => ({ ...d, discount_price: e.target.value }));
+                }}
+                className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-sm text-muted-foreground">ينتهي الخصم في</span>
+              <input
+                type="datetime-local"
+                dir="ltr"
+                value={draft.discount_ends}
+                onChange={(e) => setDraft((d) => ({ ...d, discount_ends: e.target.value }))}
+                className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
+              />
+              <span className="mt-1 block text-xs text-muted-foreground">
+                {draft.discount_ends && new Date(draft.discount_ends).getTime() <= Date.now()
+                  ? "هذا الوقت مضى — الخصم منتهٍ ولن يظهر للزبائن"
+                  : draft.discount_ends
+                    ? "بعد هذا الوقت يختفي الخصم تلقائيًا"
+                    : "اتركيه فارغًا ليبقى الخصم بدون وقت انتهاء"}
+              </span>
+            </label>
+            <p className="text-xs leading-5 text-muted-foreground sm:col-span-2">
+              يظهر للزبونة حقل «كود خصم» في صفحة هذا المنتج، وعند كتابة نفس الكود يظهر سعر الخصم.
+            </p>
+          </div>
+        ) : null}
+        {discountError && <p className="mt-2 text-sm text-destructive">{discountError}</p>}
+      </div>
 
       <div className="rounded-2xl border border-border p-4">
         <div className="flex items-center justify-between gap-2">
