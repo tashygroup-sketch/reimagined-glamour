@@ -86,6 +86,10 @@
     color: var(--color-foreground);
     font-family: var(--font-body);
     -webkit-font-smoothing: antialiased;
+    /* iPhone: no grey flash on every tap, no text-size jump when the phone is turned */
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
   h1,
@@ -260,5 +264,17 @@
   -ms-overflow-style: none;
   &::-webkit-scrollbar {
     display: none;
+  }
+}
+
+/* ---------- iPhone ---------- */
+/* iPhone zooms the whole page into any text field smaller than 16px and stays zoomed. That
+   is what made the crop screen get stuck: it opened while zoomed in, with its buttons off
+   screen. Kept outside Tailwind's layers on purpose, so it wins over text-sm / text-xs. */
+@supports (-webkit-touch-callout: none) {
+  input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  textarea,
+  select {
+    font-size: 16px;
   }
 }
