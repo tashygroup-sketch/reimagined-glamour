@@ -46,7 +46,15 @@ export function LogoIntro() {
               className="intro-seal relative h-60 w-60 rounded-full object-cover drop-shadow-[0_18px_40px_rgba(0,0,0,0.25)] sm:h-72 sm:w-72"
             />
           </div>
-          <h1 className="intro-text mt-8 text-3xl text-ink sm:text-4xl">Glamour with Jannat</h1>
+          {/* set like the logo: heavy GLAMOUR, signature "With Jannat" tucked under it */}
+          <h1 dir="ltr" className="intro-text mt-8 flex flex-col items-center text-ink">
+            <span className="font-logo text-4xl leading-none font-black tracking-tight sm:text-5xl">
+              GLAMOUR
+            </span>
+            <span className="font-script -mt-1 ms-10 text-4xl leading-none font-normal sm:text-5xl">
+              With Jannat
+            </span>
+          </h1>
           <span className="intro-text mt-3 block h-px w-32 bg-primary/70" />
           <p className="intro-text mt-3 text-sm tracking-[0.3em] text-muted-foreground">
             MAKEUP • SKINCARE

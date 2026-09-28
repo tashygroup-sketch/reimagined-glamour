@@ -90,6 +90,7 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
             qty: l.qty,
             price: l.price,
             ...(l.options?.length ? { options: l.options } : {}),
+            ...(l.discount_code ? { discount_code: l.discount_code } : {}),
           })),
           total,
         },
