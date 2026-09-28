@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
-import { checkDiscountCode, type MenuItem } from "@/lib/shop.functions";
+import { checkDiscountCode, effectivePrice, type MenuItem } from "@/lib/shop.functions";
 import type { CartOption } from "@/lib/cart";
 import { Carousel } from "@/components/Carousel";
 
@@ -103,7 +103,7 @@ export function ProductSheet({
     applied && (applied.ends_at === null || new Date(applied.ends_at).getTime() > now)
       ? applied
       : null;
-  const unitPrice = appliedLive ? appliedLive.price : Number(item.price);
+  const unitPrice = appliedLive ? appliedLive.price : effectivePrice(item);
 
   const soldOut = item.stock === 0 || remaining === 0;
   const notEnoughForMin = remaining !== null && remaining > 0 && remaining < minNeeded;
@@ -198,7 +198,7 @@ export function ProductSheet({
           <div className="flex items-start justify-between gap-3">
             <h2 className="text-xl leading-snug font-bold text-ink">{item.name}</h2>
             <div className="shrink-0 text-end">
-              {appliedLive && (
+              {unitPrice < Number(item.price) && (
                 <p className="text-sm text-muted-foreground line-through">
                   {formatPrice(item.price)} د.ل
                 </p>
