@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -13,7 +14,9 @@ import {
   type CategoryInfo,
   type MenuItem,
 } from "@/lib/shop.functions";
-import { SQUARE_CROP } from "@/lib/image";
+import { SQUARE_CROP, withUploadRetry } from "@/lib/image";
+import { parseStock } from "@/lib/stock";
+import { useCloseLayer, withLayer } from "@/lib/back-layer";
 import { CropDialog, type CroppedImage } from "./CropDialog";
 import { MenuItemForm, type MenuItemDraft } from "./MenuItemForm";
 import { Reveal } from "@/components/Reveal";
@@ -36,8 +39,33 @@ export function MenuPanel({ phone }: { phone: string }) {
   const [categoryBusy, setCategoryBusy] = useState<string | null>(null);
   const [categoryError, setCategoryError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState<MenuItem | "new" | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // The open form lives in the URL (?edit=<id> or ?edit=new) with its own history entry, so
+  // the phone's back button closes the form instead of leaving the control panel.
+  const { edit } = useSearch({ from: "/admin" });
+  const navigate = useNavigate({ from: "/admin" });
+  const closeLayer = useCloseLayer();
+  const editing: MenuItem | "new" | null =
+    edit === "new" ? "new" : edit ? ((items ?? []).find((i) => i.id === edit) ?? null) : null;
+
+  function openEditor(id: string) {
+    void navigate({
+      search: (prev) => ({ ...prev, edit: id }),
+      state: (prev) => withLayer(prev),
+      resetScroll: false,
+    });
+  }
+
+  function closeEditor() {
+    closeLayer(() =>
+      navigate({
+        search: ({ edit: _edit, ...rest }) => rest,
+        replace: true,
+        resetScroll: false,
+      }),
+    );
+  }
 
   async function load() {
     try {
@@ -84,14 +112,16 @@ export function MenuPanel({ phone }: { phone: string }) {
     try {
       let url: string | null = null;
       if (image) {
-        const res = await upload({
-          data: {
-            phone,
-            filename: image.filename,
-            contentType: image.contentType,
-            dataBase64: image.base64,
-          },
-        });
+        const res = await withUploadRetry(() =>
+          upload({
+            data: {
+              phone,
+              filename: image.filename,
+              contentType: image.contentType,
+              dataBase64: image.base64,
+            },
+          }),
+        );
         url = res.url;
       }
       await setCategoryImage({ data: { phone, name, image_url: url } });
@@ -106,14 +136,16 @@ export function MenuPanel({ phone }: { phone: string }) {
 
   // The photo arrives already cropped to 960×1280 by the crop screen.
   async function handleUploadImage(image: CroppedImage) {
-    const res = await upload({
-      data: {
-        phone,
-        filename: image.filename,
-        contentType: image.contentType,
-        dataBase64: image.base64,
-      },
-    });
+    const res = await withUploadRetry(() =>
+      upload({
+        data: {
+          phone,
+          filename: image.filename,
+          contentType: image.contentType,
+          dataBase64: image.base64,
+        },
+      }),
+    );
     return { url: res.url, ratio: res.ratio };
   }
 
@@ -138,7 +170,13 @@ export function MenuPanel({ phone }: { phone: string }) {
             stock: draft.stock.trim() === "" ? null : Math.max(0, Math.floor(Number(draft.stock))),
             variables: draft.variables.map((v) => ({
               name: v.name,
-              values: v.values.filter((x) => x.label.trim()),
+              values: v.values
+                .filter((x) => x.label.trim())
+                .map((x) => ({
+                  label: x.label,
+                  image_url: x.image_url,
+                  stock: parseStock(x.stock),
+                })),
             })),
             min_qty: Math.max(1, Math.floor(Number(draft.min_qty) || 1)),
             discount: draft.discount_code.trim()
@@ -152,7 +190,7 @@ export function MenuPanel({ phone }: { phone: string }) {
           },
         },
       });
-      setEditing(null);
+      closeEditor();
       await load();
       queryClient.invalidateQueries({ queryKey: ["menu"] });
     } catch (err) {
@@ -186,7 +224,7 @@ export function MenuPanel({ phone }: { phone: string }) {
         <MenuItemForm
           categories={categories}
           busy={busy}
-          onCancel={() => setEditing(null)}
+          onCancel={closeEditor}
           onSubmit={handleSubmit}
           onUploadImage={handleUploadImage}
           nextSortOrderFor={nextSortOrderFor}
@@ -195,7 +233,7 @@ export function MenuPanel({ phone }: { phone: string }) {
 
       {!editing && (
         <button
-          onClick={() => setEditing("new")}
+          onClick={() => openEditor("new")}
           className="rounded-full px-6 py-2.5 text-sm font-medium text-primary-foreground"
           style={{ backgroundImage: "var(--gradient-pink)" }}
         >
@@ -283,7 +321,7 @@ export function MenuPanel({ phone }: { phone: string }) {
                     initialDiscount={discounts.find((d) => d.product_id === item.id) ?? null}
                     categories={categories}
                     busy={busy}
-                    onCancel={() => setEditing(null)}
+                    onCancel={closeEditor}
                     onSubmit={handleSubmit}
                     onUploadImage={handleUploadImage}
                     nextSortOrderFor={nextSortOrderFor}
@@ -350,16 +388,25 @@ export function MenuPanel({ phone }: { phone: string }) {
                           </p>
                         );
                       })()}
-                      {item.variables.length > 0 && (
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {item.variables
-                            .map((v) => `${v.name}: ${v.values.map((x) => x.label).join("، ")}`)
-                            .join(" — ")}
+                      {item.variables.map((v) => (
+                        <p key={v.name} className="mt-1 text-xs leading-5 text-muted-foreground">
+                          {v.name}:{" "}
+                          {v.values.map((x, i) => (
+                            <span key={x.label}>
+                              {i > 0 && "، "}
+                              <span
+                                className={x.stock === 0 ? "text-destructive line-through" : ""}
+                              >
+                                {x.label}
+                              </span>
+                              {x.stock === 0 ? " (نفذ)" : x.stock !== null ? ` (${x.stock})` : ""}
+                            </span>
+                          ))}
                         </p>
-                      )}
+                      ))}
                       <div className="mt-3 flex gap-2">
                         <button
-                          onClick={() => setEditing(item)}
+                          onClick={() => openEditor(item.id)}
                           className="flex-1 rounded-full border border-primary px-3 py-1.5 text-sm text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
                         >
                           تعديل

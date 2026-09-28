@@ -1,3 +1,5 @@
+import { useBackClose } from "@/lib/back-layer";
+
 export function ConfirmDialog({
   open,
   title,
@@ -13,6 +15,7 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  useBackClose(open, onCancel); // phone's back button = إلغاء
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4 backdrop-blur-sm">
