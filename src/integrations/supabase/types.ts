@@ -41,6 +41,7 @@ export type Database = {
           image_url: string | null;
           is_available: boolean;
           min_qty: number;
+          sale_price: number | null;
           name: string;
           price: number;
           sort_order: number;
@@ -59,6 +60,7 @@ export type Database = {
           image_url?: string | null;
           is_available?: boolean;
           min_qty?: number;
+          sale_price?: number | null;
           name: string;
           price?: number;
           sort_order?: number;
@@ -77,6 +79,7 @@ export type Database = {
           image_url?: string | null;
           is_available?: boolean;
           min_qty?: number;
+          sale_price?: number | null;
           name?: string;
           price?: number;
           sort_order?: number;
