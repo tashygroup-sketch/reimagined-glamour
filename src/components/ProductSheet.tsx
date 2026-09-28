@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { checkDiscountCode, effectivePrice, type MenuItem } from "@/lib/shop.functions";
-import type { CartOption } from "@/lib/cart";
+import { useCart, type CartOption } from "@/lib/cart";
 import { Carousel } from "@/components/Carousel";
+import { useLockScroll } from "@/lib/back-layer";
+import { cartQtyOfProduct, remainingForChoice, valueRemaining, valueStock } from "@/lib/stock";
 
 export function formatPrice(price: number) {
   const n = Number(price);
@@ -36,18 +38,13 @@ function countdown(endsAt: string, now: number) {
 
 // Bottom sheet for one product: photos, one tappable choice per variable (required), the
 // product's minimum quantity, and — when the product has one — a discount-code field.
+// Values with no pieces left are greyed out and can't be chosen until restocked.
 export function ProductSheet({
   item,
-  remaining,
-  inCart,
   onClose,
   onAdd,
 }: {
   item: MenuItem | null;
-  /** pieces still available after what's already in the cart; null = unlimited */
-  remaining: number | null;
-  /** pieces of this product already in the cart (all option lines) */
-  inCart: number;
   onClose: () => void;
   onAdd: (
     item: MenuItem,
@@ -57,6 +54,7 @@ export function ProductSheet({
   ) => void;
 }) {
   const check = useServerFn(checkDiscountCode);
+  const { lines } = useCart();
   const [picked, setPicked] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<string | null>(null);
   const [qty, setQty] = useState(1);
@@ -69,7 +67,17 @@ export function ProductSheet({
 
   // The minimum counts everything of this product already in the cart, so a second colour
   // doesn't have to meet the minimum again on its own.
+  const inCart = item ? cartQtyOfProduct(lines, item.id) : 0;
   const minNeeded = item ? Math.max(1, item.min_qty - inCart) : 1;
+  // pieces of the product still available after the cart; null = unlimited
+  const remaining = item && item.stock !== null ? Math.max(0, item.stock - inCart) : null;
+  const chosen: CartOption[] = item
+    ? item.variables
+        .filter((v) => picked[v.name])
+        .map((v) => ({ name: v.name, value: picked[v.name]! }))
+    : [];
+  // ...and of the exact choice so far (each picked value has its own quantity)
+  const choiceLeft = item ? remainingForChoice(item, lines, chosen) : null;
 
   useEffect(() => {
     setPicked({});
@@ -82,17 +90,39 @@ export function ProductSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item?.id]);
 
+  useLockScroll(!!item);
   useEffect(() => {
     if (!item) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.body.style.overflow = previous;
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("keydown", onKey);
   }, [item, onClose]);
+
+  // A chosen value that has run out meanwhile (another tab, a refreshed menu) is un-chosen.
+  useEffect(() => {
+    if (!item) return;
+    setPicked((p) => {
+      const next = { ...p };
+      let changed = false;
+      for (const [name, label] of Object.entries(p)) {
+        if (valueRemaining(item, lines, name, label) === 0) {
+          delete next[name];
+          changed = true;
+        }
+      }
+      return changed ? next : p;
+    });
+  }, [item, lines]);
+
+  // Keep the quantity inside what this choice allows (and at least its minimum).
+  const choiceMin =
+    choiceLeft !== null && choiceLeft > 0 && choiceLeft < minNeeded ? choiceLeft : minNeeded;
+  useEffect(() => {
+    setQty((q) => {
+      const up = Math.max(q, choiceMin);
+      return choiceLeft !== null && choiceLeft > 0 ? Math.min(up, choiceLeft) : up;
+    });
+  }, [choiceLeft, choiceMin]);
 
   if (!item) return null;
 
@@ -106,8 +136,13 @@ export function ProductSheet({
   const unitPrice = appliedLive ? appliedLive.price : effectivePrice(item);
 
   const soldOut = item.stock === 0 || remaining === 0;
+  // The product as a whole can't reach its minimum any more.
   const notEnoughForMin = remaining !== null && remaining > 0 && remaining < minNeeded;
-  const maxQty = remaining ?? 999;
+  const maxQty = choiceLeft ?? 999;
+  // This one choice has fewer pieces than the minimum: allow adding what there is — the
+  // minimum can be completed with another value (the cart checks the minimum overall).
+  const choiceShort = !notEnoughForMin && choiceLeft !== null && choiceLeft < minNeeded;
+  const minQty = choiceShort ? Math.max(1, choiceLeft ?? 1) : minNeeded;
   const missing = item.variables.filter((v) => !picked[v.name]);
 
   const gallery = [
@@ -146,10 +181,11 @@ export function ProductSheet({
         ?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
+    if (maxQty <= 0) return;
     onAdd(
       item,
       item.variables.map((v) => ({ name: v.name, value: picked[v.name]! })),
-      Math.max(minNeeded, Math.min(qty, maxQty)),
+      Math.max(1, Math.min(Math.max(minQty, qty), maxQty)),
       appliedLive,
     );
   }
@@ -172,7 +208,7 @@ export function ProductSheet({
         onClickCapture={(e) => {
           if (preview && !(e.target as Element).closest("[data-value-chip]")) setPreview(null);
         }}
-        className="animate-scale-in max-h-[92dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-[28px] bg-card sm:rounded-[28px]"
+        className="animate-scale-in max-h-[92dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-[28px] bg-card pb-[env(safe-area-inset-bottom)] sm:rounded-[28px]"
       >
         <div className={`relative ${!preview && gallery.length === 0 ? "h-14" : ""}`}>
           {preview ? (
@@ -234,32 +270,50 @@ export function ProductSheet({
                 >
                   {v.values.map((val) => {
                     const selected = picked[v.name] === val.label;
+                    const left = valueRemaining(item, lines, v.name, val.label);
+                    const unavailable = left === 0;
+                    // 0 in the shop = sold out; otherwise the rest is already in her cart
+                    const tag = unavailable
+                      ? valueStock(item.variables, v.name, val.label) === 0
+                        ? "نفذ"
+                        : "في السلة"
+                      : null;
                     return (
                       <button
                         key={val.label}
                         type="button"
                         data-value-chip
                         aria-pressed={selected}
+                        aria-disabled={unavailable}
+                        disabled={unavailable}
                         onClick={() => {
+                          if (unavailable) return;
                           setPicked((p) => ({ ...p, [v.name]: val.label }));
                           setPreview(val.image_url);
                           if (val.image_url)
                             sheetRef.current?.scrollTo({ top: 0, behavior: "smooth" });
                         }}
                         className={`flex min-h-11 items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition-colors ${
-                          selected
-                            ? "border-primary bg-primary text-primary-foreground"
-                            : "border-border bg-card text-ink hover:border-primary"
+                          unavailable
+                            ? "cursor-not-allowed border-border bg-muted text-muted-foreground opacity-60"
+                            : selected
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : "border-border bg-card text-ink hover:border-primary"
                         } ${val.image_url ? "ps-1.5" : "px-4"}`}
                       >
                         {val.image_url && (
                           <img
                             src={val.image_url}
                             alt=""
-                            className="h-8 w-8 rounded-full object-cover"
+                            className={`h-8 w-8 rounded-full object-cover ${unavailable ? "grayscale" : ""}`}
                           />
                         )}
-                        {val.label}
+                        <span className={unavailable ? "line-through" : ""}>{val.label}</span>
+                        {tag && (
+                          <span className="rounded-full bg-card px-1.5 text-[11px] font-bold">
+                            {tag}
+                          </span>
+                        )}
                       </button>
                     );
                   })}
@@ -346,8 +400,8 @@ export function ProductSheet({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setQty((q) => Math.max(minNeeded, q - 1))}
-                  disabled={qty <= minNeeded}
+                  onClick={() => setQty((q) => Math.max(minQty, q - 1))}
+                  disabled={qty <= minQty}
                   aria-label="إنقاص الكمية"
                   className="h-11 w-11 rounded-full bg-muted text-lg text-ink disabled:opacity-40"
                 >
@@ -388,11 +442,22 @@ export function ProductSheet({
                   : `كل الكمية المتوفرة (${item.stock}) في سلتك`}
             </p>
           )}
-          {remaining !== null && remaining > 0 && remaining <= 5 && !notEnoughForMin && (
-            <p className="mt-3 text-center text-xs text-muted-foreground">
-              المتوفر {remaining} فقط
+          {!soldOut && choiceShort && (
+            <p className="mt-3 text-center text-xs leading-5 text-accent-foreground">
+              المتوفر من هذا الاختيار {choiceLeft} فقط — أكملي الحد الأدنى ({item.min_qty}) باختيار
+              آخر
             </p>
           )}
+          {!soldOut &&
+            !choiceShort &&
+            choiceLeft !== null &&
+            choiceLeft > 0 &&
+            choiceLeft <= 5 &&
+            !notEnoughForMin && (
+              <p className="mt-3 text-center text-xs text-muted-foreground">
+                المتوفر {choiceLeft} فقط
+              </p>
+            )}
         </div>
       </div>
     </div>

@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { optionsLabel, useCart } from "@/lib/cart";
 import { buildWhatsAppDraft } from "@/lib/whatsapp";
 import { createOrder } from "@/lib/shop.functions";
+import { useLockScroll } from "@/lib/back-layer";
 
 const EMPTY_FORM = { name: "", phone: "", address: "", notes: "" };
 
@@ -34,14 +35,7 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
     setLocating(false);
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [open]);
+  useLockScroll(open);
 
   if (!open) return null;
 
@@ -98,7 +92,8 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
 
       if (res.isAdmin) {
         localStorage.setItem("glamour-admin-phone", form.phone);
-        navigate({ to: "/admin" });
+        // replace: back from the control panel returns to the shop, not to this form
+        navigate({ to: "/admin", replace: true });
         return;
       }
 
@@ -127,7 +122,7 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
 
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center overflow-hidden bg-ink/40 backdrop-blur-sm sm:items-center">
-      <div className="animate-scale-in max-h-[92dvh] w-full max-w-lg overflow-y-auto overscroll-contain rounded-t-3xl bg-card p-6 shadow-[var(--shadow-card)] sm:rounded-3xl">
+      <div className="animate-scale-in max-h-[92dvh] w-full max-w-lg overflow-y-auto overscroll-contain rounded-t-3xl bg-card p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-[var(--shadow-card)] sm:rounded-3xl">
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-2xl text-ink">أكملي طلبك</h2>
