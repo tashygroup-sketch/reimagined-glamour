@@ -89,10 +89,29 @@ export type MenuItem = {
   variables: ProductVariant[];
   // "أقل كمية يمكن طلبها" — 1 means no minimum
   min_qty: number;
+  // regular discount everyone sees (no code): `price` is shown struck through as the "was"
+  // price and this is what's charged. null = no discount. Always below `price`.
+  sale_price: number | null;
   // Only whether a discount code exists and when it ends. The code and the discounted price
   // never leave the server until a customer types the right code.
   discount: { ends_at: string | null } | null;
 };
+
+// What a customer pays without a code: the sale price when there is one.
+export function effectivePrice(item: { price: number; sale_price: number | null }) {
+  return item.sale_price !== null && item.sale_price < Number(item.price)
+    ? Number(item.sale_price)
+    : Number(item.price);
+}
+
+// Admin input → stored sale price. Empty = no sale.
+function parseSalePrice(raw: unknown, regular: number): number | null {
+  if (raw === null || raw === undefined || String(raw).trim() === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) throw new Error("السعر بعد الخصم غير صحيح");
+  if (n >= regular) throw new Error("السعر بعد الخصم يجب أن يكون أقل من السعر الأصلي");
+  return Math.round(n * 100) / 100;
+}
 
 export type AdminDiscount = {
   product_id: string;
@@ -189,6 +208,7 @@ async function adminClient(phone: string) {
 }
 
 const MENU_COLUMN_SETS = [
+  "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock,variables,min_qty,sale_price",
   "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock,variables,min_qty",
   "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock,variables",
   "id,name,description,price,image_url,image_ratio,extra_images,extra_image_ratios,category,sort_order,is_available,stock",
@@ -235,6 +255,13 @@ export const getMenu = createServerFn({ method: "GET" }).handler(async () => {
       stock: row.stock ?? null,
       variables: normalizeVariables(row.variables),
       min_qty: Math.max(1, Math.floor(Number(row.min_qty) || 1)),
+      sale_price:
+        row.sale_price !== null &&
+        row.sale_price !== undefined &&
+        Number(row.sale_price) >= 0 &&
+        Number(row.sale_price) < Number(row.price)
+          ? Number(row.sale_price)
+          : null,
       discount: discounts.has(row.id!) ? { ends_at: discounts.get(row.id!) ?? null } : null,
     })) as MenuItem[];
   }
@@ -342,9 +369,11 @@ export const createOrder = createServerFn({ method: "POST" })
         price: number;
         variables?: unknown;
         min_qty?: number;
+        sale_price?: number | null;
       };
       let rows: ProductRow[] = [];
       for (const cols of [
+        "id,name,price,sale_price,variables,min_qty",
         "id,name,price,variables,min_qty",
         "id,name,price,variables",
         "id,name,price",
@@ -399,7 +428,11 @@ export const createOrder = createServerFn({ method: "POST" })
         }
 
         // price: the discount price only with a valid, unexpired code; otherwise the regular one
-        let price = Number(row.price);
+        let price = effectivePrice({
+          price: Number(row.price),
+          sale_price:
+            row.sale_price === null || row.sale_price === undefined ? null : Number(row.sale_price),
+        });
         const typed = item.discount_code?.trim();
         if (typed) {
           const d = discounts.get(row.id);
@@ -517,6 +550,7 @@ export const saveMenuItem = createServerFn({ method: "POST" })
         stock?: number | null;
         variables?: ProductVariant[];
         min_qty?: number;
+        sale_price?: number | null;
         // null/empty code = remove the product's discount
         discount?: { code: string; discount_price: number; ends_at: string | null } | null;
       };
@@ -544,6 +578,7 @@ export const saveMenuItem = createServerFn({ method: "POST" })
           : Math.max(0, Math.floor(Number(data.item.stock) || 0)),
       variables: sanitizeVariables(data.item.variables),
       min_qty: Math.min(999, Math.max(1, Math.floor(Number(data.item.min_qty) || 1))),
+      sale_price: parseSalePrice(data.item.sale_price, Number(data.item.price) || 0),
     };
 
     // Validate the discount before writing anything, so a bad discount doesn't leave the
@@ -555,8 +590,8 @@ export const saveMenuItem = createServerFn({ method: "POST" })
       if (!Number.isFinite(discountPrice) || discountPrice < 0) {
         throw new Error("اكتبي سعر الخصم");
       }
-      if (discountPrice >= payload.price) {
-        throw new Error("سعر الخصم يجب أن يكون أقل من السعر الأصلي");
+      if (discountPrice >= effectivePrice(payload)) {
+        throw new Error("السعر مع الكود يجب أن يكون أقل من سعر المنتج الحالي");
       }
       const endsAt = data.item.discount?.ends_at ?? null;
       if (endsAt !== null && Number.isNaN(new Date(endsAt).getTime())) {
@@ -583,26 +618,31 @@ export const saveMenuItem = createServerFn({ method: "POST" })
       return { error, id: inserted?.id as string | undefined };
     };
 
+    // Newer columns may not be migrated onto the live database yet. Retry without them one
+    // generation at a time, but never silently drop a setting the owner actually used.
+    const needMigration = () =>
+      new Error(
+        "شغّلي ملفات تحديث قاعدة البيانات الجديدة في Supabase (SQL Editor) ثم احفظي مرة أخرى",
+      );
     let result = await write(payload);
     if (isMissingColumn(result.error)) {
-      // A newer column hasn't been migrated onto the live database yet. Settings the owner
-      // actually used can't be dropped silently, so ask for the migration instead.
-      if (payload.variables.length > 0 || payload.min_qty > 1) {
-        throw new Error(
-          "لحفظ المتغيرات أو أقل كمية شغّلي ملفات تحديث قاعدة البيانات الجديدة في Supabase (SQL Editor) أولاً",
-        );
-      }
-      const { variables: _variables, min_qty: _minQty, ...older } = payload;
-      result = await write(older);
+      if (payload.sale_price !== null) throw needMigration();
+      const { sale_price: _sale, ...noSale } = payload;
+      result = await write(noSale);
       if (isMissingColumn(result.error)) {
-        const {
-          extra_images: _extraImages,
-          extra_image_ratios: _ratios,
-          image_ratio: _ratio,
-          stock: _stock,
-          ...rest
-        } = older;
-        result = await write(rest);
+        if (payload.variables.length > 0 || payload.min_qty > 1) throw needMigration();
+        const { variables: _variables, min_qty: _minQty, ...older } = noSale;
+        result = await write(older);
+        if (isMissingColumn(result.error)) {
+          const {
+            extra_images: _extraImages,
+            extra_image_ratios: _ratios,
+            image_ratio: _ratio,
+            stock: _stock,
+            ...rest
+          } = older;
+          result = await write(rest);
+        }
       }
     }
     if (result.error) throw new Error(result.error.message);
