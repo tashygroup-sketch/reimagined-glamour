@@ -100,6 +100,24 @@ export type MenuItem = {
   discount: { ends_at: string | null } | null;
 };
 
+// The photo shown on a product's card. Normally the main photo; when the owner added photos
+// only as extra photos or only on the values (colours), the first of those is used, so a
+// product that has any photo at all never shows an empty box.
+export function coverImage(item: {
+  image_url: string | null;
+  extra_images?: string[];
+  variables?: { values: { image_url: string | null }[] }[];
+}): string | null {
+  if (item.image_url) return item.image_url;
+  const extra = (item.extra_images ?? []).find(Boolean);
+  if (extra) return extra;
+  for (const v of item.variables ?? []) {
+    const withPhoto = v.values.find((x) => x.image_url);
+    if (withPhoto) return withPhoto.image_url;
+  }
+  return null;
+}
+
 // What a customer pays without a code: the sale price when there is one.
 export function effectivePrice(item: { price: number; sale_price: number | null }) {
   return item.sale_price !== null && item.sale_price < Number(item.price)
@@ -587,14 +605,32 @@ export const saveMenuItem = createServerFn({ method: "POST" })
       }
       if (fnError) throw new Error(fnError.message);
     }
+    // A product saved with extra photos but no main photo gets its first extra photo as the
+    // main one, so its card is never empty.
+    let mainImage = data.item.image_url?.trim() || null;
+    let mainRatio = data.item.image_ratio ?? null;
+    let extraImages = (data.item.extra_images ?? []).map((u) => u.trim());
+    let extraRatios = data.item.extra_image_ratios ?? [];
+    if (!mainImage) {
+      const first = extraImages.findIndex(Boolean);
+      if (first !== -1) {
+        mainImage = extraImages[first]!;
+        mainRatio = extraRatios[first] ?? null;
+        extraImages = extraImages.filter((_, i) => i !== first);
+        extraRatios = extraRatios.filter((_, i) => i !== first);
+      }
+    }
+    // drop empty addresses, keeping each remaining photo next to its own shape
+    extraRatios = extraRatios.filter((_, i) => Boolean(extraImages[i]));
+    extraImages = extraImages.filter(Boolean);
     const payload = {
       name: data.item.name.trim().slice(0, 120),
       description: data.item.description?.trim().slice(0, 500) ?? null,
       price: Number(data.item.price) || 0,
-      image_url: data.item.image_url?.trim() || null,
-      image_ratio: data.item.image_ratio ?? null,
-      extra_images: (data.item.extra_images ?? []).map((u) => u.trim()).filter(Boolean),
-      extra_image_ratios: data.item.extra_image_ratios ?? [],
+      image_url: mainImage,
+      image_ratio: mainRatio,
+      extra_images: extraImages,
+      extra_image_ratios: extraRatios,
       category: data.item.category?.trim().slice(0, 60) || "مكياج",
       sort_order: Number(data.item.sort_order) || 0,
       is_available: data.item.is_available ?? true,
@@ -723,7 +759,14 @@ export const uploadMenuImage = createServerFn({ method: "POST" })
     const path = `${crypto.randomUUID()}.${ext}`;
     const { error } = await db.storage
       .from("menu-photos")
-      .upload(path, bytes, { contentType: data.contentType || "image/jpeg", upsert: false });
+      // Every upload gets a new random name and is never changed afterwards, so phones may
+      // keep it for a year: a returning customer sees the photos instantly, without
+      // downloading them again.
+      .upload(path, bytes, {
+        contentType: data.contentType || "image/jpeg",
+        upsert: false,
+        cacheControl: "31536000",
+      });
     if (error) throw new Error(error.message);
     const { data: pub } = db.storage.from("menu-photos").getPublicUrl(path);
     const ratio = getImageRatio(bytes);
@@ -786,8 +829,9 @@ export const getStorySection = createServerFn({ method: "GET" }).handler(async (
     story_title: settings.data?.story_title ?? DEFAULT_STORY.story_title,
     story_text: settings.data?.story_text ?? DEFAULT_STORY.story_text,
     hero_image_url: settings.data?.hero_image_url ?? null,
-    hero_title: settings.data?.hero_title || DEFAULT_HERO.hero_title,
-    hero_subtitle: settings.data?.hero_subtitle || DEFAULT_HERO.hero_subtitle,
+    // null = never edited (built-in wording); "" = the owner cleared it, so nothing is shown
+    hero_title: settings.data?.hero_title ?? DEFAULT_HERO.hero_title,
+    hero_subtitle: settings.data?.hero_subtitle ?? DEFAULT_HERO.hero_subtitle,
     images: (promos.data ?? []) as Promotion[],
   };
 });
@@ -801,9 +845,10 @@ export const saveStorySettings = createServerFn({ method: "POST" })
     const db = await adminClient(data.phone);
     const { error } = await db.from("site_settings").upsert({
       id: 1,
-      story_label: data.story_label.trim().slice(0, 60) || DEFAULT_STORY.story_label,
-      story_title: data.story_title.trim().slice(0, 120) || DEFAULT_STORY.story_title,
-      story_text: data.story_text.trim().slice(0, 800) || DEFAULT_STORY.story_text,
+      // Saved exactly as typed: an emptied field stays empty and is hidden on the site.
+      story_label: (data.story_label ?? "").trim().slice(0, 60),
+      story_title: (data.story_title ?? "").trim().slice(0, 120),
+      story_text: (data.story_text ?? "").trim().slice(0, 800),
     });
     if (error) throw new Error(error.message);
     return { ok: true };
@@ -901,8 +946,9 @@ export const saveHeroText = createServerFn({ method: "POST" })
     const db = await adminClient(data.phone);
     const { error } = await db.from("site_settings").upsert({
       id: 1,
-      hero_title: data.hero_title.trim().slice(0, 120) || DEFAULT_HERO.hero_title,
-      hero_subtitle: data.hero_subtitle.trim().slice(0, 400) || DEFAULT_HERO.hero_subtitle,
+      // Saved exactly as typed: an emptied line stays empty and is hidden on the site.
+      hero_title: (data.hero_title ?? "").trim().slice(0, 120),
+      hero_subtitle: (data.hero_subtitle ?? "").trim().slice(0, 400),
     });
     if (isMissingColumn(error)) {
       throw new Error("يرجى تشغيل تحديث قاعدة البيانات أولاً (Supabase → SQL Editor)");

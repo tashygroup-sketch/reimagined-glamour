@@ -11,6 +11,8 @@
 // A short bilingual dictionary covers words whose spelling differs completely between the
 // two languages (red ↔ أحمر, perfume ↔ عطر).
 
+import { compareNames } from "@/lib/sort";
+
 export type SearchableProduct = {
   id: string;
   name: string;
@@ -389,8 +391,11 @@ export function searchProducts<T extends SearchableProduct>(
   // Drop weak tail matches once there are strong ones, so a clear hit isn't buried under
   // loosely related products.
   const top = scored.reduce((m, s) => Math.max(m, s.score), 0);
-  return scored
-    .filter((s) => s.score >= top * 0.55)
-    .sort((a, b) => b.score - a.score || a.item.sort_order - b.item.sort_order)
-    .map((s) => s.item);
+  return (
+    scored
+      .filter((s) => s.score >= top * 0.55)
+      // best match first; equally good matches in alphabetical order
+      .sort((a, b) => b.score - a.score || compareNames(a.item.name, b.item.name))
+      .map((s) => s.item)
+  );
 }
