@@ -238,13 +238,23 @@ export function StoryPanel({ phone }: { phone: string }) {
         onSubmit={handleSaveHeroText}
         className="space-y-3 rounded-3xl bg-card p-5 shadow-[var(--shadow-card)]"
       >
+        <div>
+          <h3 className="text-lg text-ink">نص الواجهة</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            كل الحقول اختيارية: امسحي أي حقل واضغطي «حفظ النص» ليختفي من الموقع.
+          </p>
+        </div>
         <label className="block">
           <span className="mb-1 block text-sm text-muted-foreground">
             السطر الصغير فوق اسم المتجر
           </span>
           <input
             value={heroForm.hero_title}
-            onChange={(e) => setHeroForm((f) => ({ ...f, hero_title: e.target.value }))}
+            placeholder="فارغ — لن يظهر في الموقع"
+            onChange={(e) => {
+              setHeroTextSaved(false);
+              setHeroForm((f) => ({ ...f, hero_title: e.target.value }));
+            }}
             className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
           />
         </label>
@@ -253,7 +263,11 @@ export function StoryPanel({ phone }: { phone: string }) {
           <textarea
             rows={3}
             value={heroForm.hero_subtitle}
-            onChange={(e) => setHeroForm((f) => ({ ...f, hero_subtitle: e.target.value }))}
+            placeholder="فارغ — لن يظهر في الموقع"
+            onChange={(e) => {
+              setHeroTextSaved(false);
+              setHeroForm((f) => ({ ...f, hero_subtitle: e.target.value }));
+            }}
             className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
           />
         </label>
@@ -274,11 +288,22 @@ export function StoryPanel({ phone }: { phone: string }) {
         onSubmit={handleSave}
         className="space-y-3 rounded-3xl bg-card p-5 shadow-[var(--shadow-card)]"
       >
+        <div>
+          <h3 className="text-lg text-ink">القسم أسفل المنتجات</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            اختياري: امسحي أي حقل ليختفي، وإذا مسحتِ الحقول الثلاثة وحفظتِ يختفي القسم كله من
+            الموقع.
+          </p>
+        </div>
         <label className="block">
           <span className="mb-1 block text-sm text-muted-foreground">العنوان الصغير</span>
           <input
             value={form.story_label}
-            onChange={(e) => setForm((f) => ({ ...f, story_label: e.target.value }))}
+            placeholder="فارغ — لن يظهر في الموقع"
+            onChange={(e) => {
+              setSaved(false);
+              setForm((f) => ({ ...f, story_label: e.target.value }));
+            }}
             className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
           />
         </label>
@@ -286,7 +311,11 @@ export function StoryPanel({ phone }: { phone: string }) {
           <span className="mb-1 block text-sm text-muted-foreground">العنوان الرئيسي</span>
           <input
             value={form.story_title}
-            onChange={(e) => setForm((f) => ({ ...f, story_title: e.target.value }))}
+            placeholder="فارغ — لن يظهر في الموقع"
+            onChange={(e) => {
+              setSaved(false);
+              setForm((f) => ({ ...f, story_title: e.target.value }));
+            }}
             className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
           />
         </label>
@@ -295,7 +324,11 @@ export function StoryPanel({ phone }: { phone: string }) {
           <textarea
             rows={4}
             value={form.story_text}
-            onChange={(e) => setForm((f) => ({ ...f, story_text: e.target.value }))}
+            placeholder="فارغ — لن يظهر في الموقع"
+            onChange={(e) => {
+              setSaved(false);
+              setForm((f) => ({ ...f, story_text: e.target.value }));
+            }}
             className="w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:border-primary"
           />
         </label>
@@ -317,7 +350,8 @@ export function StoryPanel({ phone }: { phone: string }) {
           <div>
             <h3 className="text-lg text-ink">صور الإعلانات</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              تظهر في البطاقة المائلة أعلى الموقع وتتبدّل تلقائيًا.
+              اختيارية: تظهر في البطاقة المائلة أعلى الموقع وتتبدّل تلقائيًا. بدون صور لا تظهر
+              البطاقة إطلاقًا.
             </p>
           </div>
           <label className="inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-primary">
@@ -349,7 +383,9 @@ export function StoryPanel({ phone }: { phone: string }) {
             </div>
           ))}
           {data.images.length === 0 && (
-            <p className="py-6 text-sm text-muted-foreground">لا توجد صور بعد</p>
+            <p className="py-6 text-sm text-muted-foreground">
+              لا توجد إعلانات — الموقع يظهر بدون بطاقة الإعلانات
+            </p>
           )}
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { AdminDiscount, MenuItem, ProductVariant } from "@/lib/shop.functions";
 import {
   hasValueStock,
@@ -181,6 +181,8 @@ export function MenuItemForm({
   // Our own copy of the options, so a category created here shows as selected immediately.
   const [availableCategories, setAvailableCategories] = useState(categories);
   const [uploadingMain, setUploadingMain] = useState(false);
+  // true while a main photo is on its way (read inside uploads that finish later)
+  const mainOnItsWay = useRef(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pendingCrop, setPendingCrop] = useState<{ file: File; target: CropTarget } | null>(null);
 
@@ -238,12 +240,14 @@ export function MenuItemForm({
 
   async function uploadMain(image: CroppedImage) {
     setUploadingMain(true);
+    mainOnItsWay.current = true;
     try {
       const { url, ratio } = await onUploadImage(image);
       setDraft((d) => ({ ...d, image_url: url, image_ratio: ratio }));
     } catch (err) {
       failed(err);
     } finally {
+      mainOnItsWay.current = false;
       setUploadingMain(false);
     }
   }
@@ -252,11 +256,17 @@ export function MenuItemForm({
     setPendingExtras((n) => n + 1);
     try {
       const { url, ratio } = await onUploadImage(image);
-      setDraft((d) => ({
-        ...d,
-        extra_images: [...d.extra_images, url],
-        extra_image_ratios: [...d.extra_image_ratios, ratio ?? 4 / 3],
-      }));
+      setDraft((d) =>
+        // No main photo yet: the first photo added with «+ صورة» becomes the main one —
+        // it's the one shown on the product's card, so the card is never left empty.
+        !d.image_url && !mainOnItsWay.current
+          ? { ...d, image_url: url, image_ratio: ratio }
+          : {
+              ...d,
+              extra_images: [...d.extra_images, url],
+              extra_image_ratios: [...d.extra_image_ratios, ratio ?? 4 / 3],
+            },
+      );
     } catch (err) {
       failed(err);
     } finally {
@@ -782,11 +792,16 @@ export function MenuItemForm({
         {/* main photo first, extra photos beside it, then the add-extra tile */}
         <div className="scrollbar-none flex gap-2 overflow-x-auto pb-1">
           {draft.image_url ? (
-            <img
-              src={draft.image_url}
-              alt=""
-              className="h-24 w-[72px] shrink-0 rounded-xl border-2 border-primary object-cover"
-            />
+            <div className="relative h-24 w-[72px] shrink-0">
+              <img
+                src={draft.image_url}
+                alt=""
+                className="h-full w-full rounded-xl border-2 border-primary object-cover"
+              />
+              <span className="absolute inset-x-0 bottom-0 rounded-b-xl bg-primary py-0.5 text-center text-[10px] font-bold text-primary-foreground">
+                الصورة الرئيسية
+              </span>
+            </div>
           ) : (
             <div className="flex h-24 w-[72px] shrink-0 items-center justify-center rounded-xl border-2 border-primary/40 bg-muted text-center text-[11px] text-muted-foreground">
               {uploadingMain ? "..." : "بدون صورة"}
@@ -821,7 +836,11 @@ export function MenuItemForm({
 
         <label className="relative mt-3 inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-primary">
           <span className="rounded-full border border-primary px-3 py-1.5">
-            {uploadingMain ? "جارِ الرفع..." : "📷 اختيار صورة من المعرض"}
+            {uploadingMain
+              ? "جارِ الرفع..."
+              : draft.image_url
+                ? "📷 تغيير الصورة الرئيسية"
+                : "📷 اختيار الصورة الرئيسية"}
           </span>
           <input
             type="file"

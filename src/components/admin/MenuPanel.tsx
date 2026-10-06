@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Search, X } from "lucide-react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  coverImage,
   getMenu,
   getCategories,
   getDiscountsAdmin,
@@ -17,6 +19,11 @@ import {
 import { SQUARE_CROP, withUploadRetry } from "@/lib/image";
 import { parseStock } from "@/lib/stock";
 import { useCloseLayer, withLayer } from "@/lib/back-layer";
+import { buildSearchIndex, searchProducts } from "@/lib/search";
+import { sortByName, type NameOrder } from "@/lib/sort";
+import { arCount } from "@/lib/utils";
+import { Photo, PhotoGroup } from "@/components/Photo";
+import { SortToggle } from "@/components/SortToggle";
 import { CropDialog, type CroppedImage } from "./CropDialog";
 import { MenuItemForm, type MenuItemDraft } from "./MenuItemForm";
 import { Reveal } from "@/components/Reveal";
@@ -40,6 +47,14 @@ export function MenuPanel({ phone }: { phone: string }) {
   const [categoryError, setCategoryError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Same search as the shop (Arabic, English, Arabizi, typos), over every product here.
+  const [query, setQuery] = useState("");
+  const [order, setOrder] = useState<NameOrder>("az");
+  const searchIndex = useMemo(() => buildSearchIndex(items ?? []), [items]);
+  const results = useMemo(
+    () => (query.trim() ? searchProducts(searchIndex, query) : null),
+    [searchIndex, query],
+  );
 
   // The open form lives in the URL (?edit=<id> or ?edit=new) with its own history entry, so
   // the phone's back button closes the form instead of leaving the control panel.
@@ -218,6 +233,118 @@ export function MenuPanel({ phone }: { phone: string }) {
   if (error) return <p className="py-10 text-center text-destructive">{error}</p>;
   if (!items) return <p className="py-10 text-center text-muted-foreground">جارِ التحميل...</p>;
 
+  // One product: its edit form while it's being edited, otherwise its card. A plain render
+  // function (not an inner component), so the open form keeps what was typed when the list
+  // re-renders.
+  function renderItem(item: MenuItem, withCategory = false) {
+    if (editing !== "new" && editing?.id === item.id) {
+      return (
+        <MenuItemForm
+          key={item.id}
+          initial={item}
+          initialDiscount={discounts.find((d) => d.product_id === item.id) ?? null}
+          categories={categories}
+          busy={busy}
+          onCancel={closeEditor}
+          onSubmit={handleSubmit}
+          onUploadImage={handleUploadImage}
+          nextSortOrderFor={nextSortOrderFor}
+        />
+      );
+    }
+    const cover = coverImage(item);
+    const discount = discounts.find((x) => x.product_id === item.id);
+    const discountEnded =
+      !!discount && discount.ends_at !== null && new Date(discount.ends_at).getTime() <= Date.now();
+    return (
+      <article
+        key={item.id}
+        className="overflow-hidden rounded-3xl bg-card shadow-[var(--shadow-card)]"
+      >
+        {cover ? (
+          // fixed height: the card doesn't jump when its photo arrives
+          <div
+            className={`photo-slot h-56 w-full bg-muted ${
+              item.stock === 0 ? "opacity-50 grayscale" : ""
+            }`}
+          >
+            <Photo src={cover} alt={item.name} className="h-full w-full object-contain" />
+          </div>
+        ) : (
+          <div className="flex h-36 w-full items-center justify-center bg-muted text-sm text-muted-foreground">
+            بدون صورة
+          </div>
+        )}
+        <div className="p-4">
+          <div className="flex items-center justify-between gap-2">
+            <h4 className="text-ink">{item.name}</h4>
+            {item.stock === 0 ? (
+              <span className="shrink-0 rounded-full bg-destructive px-2 py-0.5 text-xs text-destructive-foreground">
+                نفذت الكمية
+              </span>
+            ) : item.stock !== null ? (
+              <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-ink">
+                متوفر: {item.stock}
+              </span>
+            ) : null}
+          </div>
+          {withCategory && <p className="text-xs text-muted-foreground">{item.category}</p>}
+          <p className="mt-1 flex flex-wrap items-baseline gap-x-2">
+            <span className="font-bold text-primary">
+              {Number(item.sale_price ?? item.price).toFixed(2)} د.ل
+            </span>
+            {item.sale_price !== null && (
+              <span className="text-sm text-muted-foreground line-through">
+                {Number(item.price).toFixed(2)}
+              </span>
+            )}
+          </p>
+          {item.min_qty > 1 && (
+            <p className="mt-1 text-xs text-muted-foreground">أقل كمية: {item.min_qty}</p>
+          )}
+          {discount && (
+            <p
+              className={`mt-1 text-xs ${discountEnded ? "text-muted-foreground line-through" : "text-accent-foreground"}`}
+            >
+              كود {discount.code}: {discount.discount_price.toFixed(2)} د.ل
+              {discount.ends_at
+                ? ` — ${discountEnded ? "انتهى" : "حتى"} ${new Date(discount.ends_at).toLocaleString("ar-LY", { dateStyle: "short", timeStyle: "short" })}`
+                : ""}
+            </p>
+          )}
+          {item.variables.map((v) => (
+            <p key={v.name} className="mt-1 text-xs leading-5 text-muted-foreground">
+              {v.name}:{" "}
+              {v.values.map((x, i) => (
+                <span key={x.label}>
+                  {i > 0 && "، "}
+                  <span className={x.stock === 0 ? "text-destructive line-through" : ""}>
+                    {x.label}
+                  </span>
+                  {x.stock === 0 ? " (نفذ)" : x.stock !== null ? ` (${x.stock})` : ""}
+                </span>
+              ))}
+            </p>
+          ))}
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => openEditor(item.id)}
+              className="flex-1 rounded-full border border-primary px-3 py-1.5 text-sm text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
+            >
+              تعديل
+            </button>
+            <button
+              onClick={() => setDeleteTarget(item.id)}
+              className="rounded-full border border-destructive px-3 py-1.5 text-sm text-destructive transition-colors hover:bg-destructive hover:text-destructive-foreground"
+            >
+              حذف
+            </button>
+          </div>
+        </div>
+      </article>
+    );
+  }
+
   return (
     <div className="space-y-5">
       {editing === "new" && (
@@ -241,7 +368,38 @@ export function MenuPanel({ phone }: { phone: string }) {
         </button>
       )}
 
-      {!editing && categories.length > 1 && (
+      {/* Search + alphabetical order. Hidden while a form is open, so the list can't change
+          under the form and lose what was typed in it. */}
+      {!editing && items.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="relative block min-w-0 flex-1 basis-56">
+            <span className="sr-only">ابحثي في منتجاتك</span>
+            <Search className="pointer-events-none absolute top-1/2 right-4 h-5 w-5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="search"
+              dir="auto"
+              enterKeyHint="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="ابحثي في منتجاتك: اسم، لون أو قسم / Search"
+              className="h-12 w-full rounded-full border border-border bg-card ps-11 pe-11 text-[16px] text-ink outline-none placeholder:text-muted-foreground focus:border-primary"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="مسح البحث"
+                className="absolute top-1/2 left-2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </label>
+          {!results && items.length > 1 && <SortToggle value={order} onChange={setOrder} />}
+        </div>
+      )}
+
+      {!editing && !results && categories.length > 1 && (
         <Reveal>
           <div>
             <p className="mb-2 text-xs tracking-[0.25em] text-primary">الرفوف</p>
@@ -266,165 +424,89 @@ export function MenuPanel({ phone }: { phone: string }) {
 
       {categoryError && <p className="text-sm text-destructive">{categoryError}</p>}
 
-      {categories.map((cat) => (
-        <div key={cat} id={`admin-cat-${cat.replace(/\s+/g, "-")}`} className="scroll-mt-24">
-          <div className="mb-3 flex items-center gap-3">
-            <label className="relative flex h-16 w-16 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border border-dashed border-primary/60 bg-muted text-center text-[10px] leading-4 text-primary">
-              {categoryImage(cat) ? (
-                <img src={categoryImage(cat)!} alt="" className="h-full w-full object-cover" />
-              ) : categoryBusy === cat ? (
-                "..."
-              ) : (
-                "+ صورة القسم"
-              )}
-              <input
-                type="file"
-                accept="image/*"
-                className="hidden"
-                disabled={categoryBusy !== null}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  e.target.value = "";
-                  if (file) setCategoryCrop({ file, name: cat });
-                }}
-              />
-            </label>
-            <div className="min-w-0 flex-1">
-              <h3 className="text-lg text-ink">{cat}</h3>
-              <p className="text-xs text-muted-foreground">
-                {categoryBusy === cat
-                  ? "جارِ الحفظ..."
-                  : categoryImage(cat)
-                    ? "اضغطي على الصورة لتغييرها"
-                    : "صورة المربع الذي يظهر في الصفحة الرئيسية"}
+      <PhotoGroup>
+        {results ? (
+          results.length > 0 ? (
+            <div>
+              <p className="mb-3 text-sm text-muted-foreground">
+                {arCount(results.length, ["نتيجة واحدة", "نتيجتان", "نتائج", "نتيجة"])}
               </p>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {results.map((item) => renderItem(item, true))}
+              </div>
             </div>
-            {categoryImage(cat) && (
+          ) : (
+            <div className="py-10 text-center">
+              <p className="text-lg text-ink">لا توجد نتائج لـ «{query.trim()}»</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                جرّبي كلمة أخرى، أو اسم اللون أو القسم.
+              </p>
               <button
                 type="button"
-                disabled={categoryBusy !== null}
-                onClick={() => changeCategoryImage(cat, null)}
-                className="shrink-0 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground"
+                onClick={() => setQuery("")}
+                className="mt-5 rounded-full border border-primary px-6 py-2.5 text-sm font-bold text-primary"
               >
-                إزالة الصورة
+                عرض كل المنتجات
               </button>
-            )}
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {items
-              .filter((item) => item.category === cat)
-              .map((item) =>
-                editing !== "new" && editing?.id === item.id ? (
-                  <MenuItemForm
-                    key={item.id}
-                    initial={item}
-                    initialDiscount={discounts.find((d) => d.product_id === item.id) ?? null}
-                    categories={categories}
-                    busy={busy}
-                    onCancel={closeEditor}
-                    onSubmit={handleSubmit}
-                    onUploadImage={handleUploadImage}
-                    nextSortOrderFor={nextSortOrderFor}
-                  />
-                ) : (
-                  <article
-                    key={item.id}
-                    className="overflow-hidden rounded-3xl bg-card shadow-[var(--shadow-card)]"
-                  >
-                    {item.image_url ? (
-                      <img
-                        src={item.image_url}
-                        alt={item.name}
-                        className={`max-h-56 w-full bg-muted object-contain ${
-                          item.stock === 0 ? "opacity-50 grayscale" : ""
-                        }`}
-                      />
+            </div>
+          )
+        ) : (
+          <div className="space-y-5">
+            {categories.map((cat) => (
+              <div key={cat} id={`admin-cat-${cat.replace(/\s+/g, "-")}`} className="scroll-mt-24">
+                <div className="mb-3 flex items-center gap-3">
+                  <label className="photo-slot relative flex h-16 w-16 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border border-dashed border-primary/60 bg-muted text-center text-[10px] leading-4 text-primary">
+                    {categoryImage(cat) ? (
+                      <Photo src={categoryImage(cat)!} className="h-full w-full object-cover" />
+                    ) : categoryBusy === cat ? (
+                      "..."
                     ) : (
-                      <div className="flex h-36 w-full items-center justify-center bg-muted text-sm text-muted-foreground">
-                        بدون صورة
-                      </div>
+                      "+ صورة القسم"
                     )}
-                    <div className="p-4">
-                      <div className="flex items-center justify-between gap-2">
-                        <h4 className="text-ink">{item.name}</h4>
-                        {item.stock === 0 ? (
-                          <span className="shrink-0 rounded-full bg-destructive px-2 py-0.5 text-xs text-destructive-foreground">
-                            نفذت الكمية
-                          </span>
-                        ) : item.stock !== null ? (
-                          <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-ink">
-                            متوفر: {item.stock}
-                          </span>
-                        ) : null}
-                      </div>
-                      <p className="mt-1 flex flex-wrap items-baseline gap-x-2">
-                        <span className="font-bold text-primary">
-                          {Number(item.sale_price ?? item.price).toFixed(2)} د.ل
-                        </span>
-                        {item.sale_price !== null && (
-                          <span className="text-sm text-muted-foreground line-through">
-                            {Number(item.price).toFixed(2)}
-                          </span>
-                        )}
-                      </p>
-                      {item.min_qty > 1 && (
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          أقل كمية: {item.min_qty}
-                        </p>
-                      )}
-                      {(() => {
-                        const d = discounts.find((x) => x.product_id === item.id);
-                        if (!d) return null;
-                        const ended =
-                          d.ends_at !== null && new Date(d.ends_at).getTime() <= Date.now();
-                        return (
-                          <p
-                            className={`mt-1 text-xs ${ended ? "text-muted-foreground line-through" : "text-accent-foreground"}`}
-                          >
-                            كود {d.code}: {d.discount_price.toFixed(2)} د.ل
-                            {d.ends_at
-                              ? ` — ${ended ? "انتهى" : "حتى"} ${new Date(d.ends_at).toLocaleString("ar-LY", { dateStyle: "short", timeStyle: "short" })}`
-                              : ""}
-                          </p>
-                        );
-                      })()}
-                      {item.variables.map((v) => (
-                        <p key={v.name} className="mt-1 text-xs leading-5 text-muted-foreground">
-                          {v.name}:{" "}
-                          {v.values.map((x, i) => (
-                            <span key={x.label}>
-                              {i > 0 && "، "}
-                              <span
-                                className={x.stock === 0 ? "text-destructive line-through" : ""}
-                              >
-                                {x.label}
-                              </span>
-                              {x.stock === 0 ? " (نفذ)" : x.stock !== null ? ` (${x.stock})` : ""}
-                            </span>
-                          ))}
-                        </p>
-                      ))}
-                      <div className="mt-3 flex gap-2">
-                        <button
-                          onClick={() => openEditor(item.id)}
-                          className="flex-1 rounded-full border border-primary px-3 py-1.5 text-sm text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
-                        >
-                          تعديل
-                        </button>
-                        <button
-                          onClick={() => setDeleteTarget(item.id)}
-                          className="rounded-full border border-destructive px-3 py-1.5 text-sm text-destructive transition-colors hover:bg-destructive hover:text-destructive-foreground"
-                        >
-                          حذف
-                        </button>
-                      </div>
-                    </div>
-                  </article>
-                ),
-              )}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      disabled={categoryBusy !== null}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (file) setCategoryCrop({ file, name: cat });
+                      }}
+                    />
+                  </label>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-lg text-ink">{cat}</h3>
+                    <p className="text-xs text-muted-foreground">
+                      {categoryBusy === cat
+                        ? "جارِ الحفظ..."
+                        : categoryImage(cat)
+                          ? "اضغطي على الصورة لتغييرها"
+                          : "صورة المربع الذي يظهر في الصفحة الرئيسية"}
+                    </p>
+                  </div>
+                  {categoryImage(cat) && (
+                    <button
+                      type="button"
+                      disabled={categoryBusy !== null}
+                      onClick={() => changeCategoryImage(cat, null)}
+                      className="shrink-0 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground"
+                    >
+                      إزالة الصورة
+                    </button>
+                  )}
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {sortByName(
+                    items.filter((item) => item.category === cat),
+                    order,
+                  ).map((item) => renderItem(item))}
+                </div>
+              </div>
+            ))}
           </div>
-        </div>
-      ))}
+        )}
+      </PhotoGroup>
       {items.length === 0 && (
         <p className="py-10 text-center text-muted-foreground">لا توجد أصناف بعد</p>
       )}
