@@ -3,6 +3,7 @@ import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Check, Plus, Search, ShoppingBag, X } from "lucide-react";
 import {
+  coverImage,
   effectivePrice,
   getCategories,
   getMenu,
@@ -11,11 +12,15 @@ import {
 } from "@/lib/shop.functions";
 import { LogoIntro } from "@/components/LogoIntro";
 import { Carousel } from "@/components/Carousel";
+import { Photo, PhotoGroup } from "@/components/Photo";
+import { SortToggle } from "@/components/SortToggle";
 import { BookingDialog } from "@/components/BookingDialog";
 import { ProductSheet, formatPrice, type AppliedDiscount } from "@/components/ProductSheet";
 import { SocialLinks } from "@/components/SocialLinks";
 import { optionsLabel, useCart, type CartOption } from "@/lib/cart";
 import { buildSearchIndex, searchProducts } from "@/lib/search";
+import { sortByName, type NameOrder } from "@/lib/sort";
+import { arCount } from "@/lib/utils";
 import { keepLayer, useCloseLayer, useLockScroll, withLayer } from "@/lib/back-layer";
 import { overStockValue, remainingForChoice } from "@/lib/stock";
 import { WHATSAPP_NUMBER } from "@/lib/whatsapp";
@@ -68,18 +73,17 @@ export const Route = createFileRoute("/")({
   component: Home,
 });
 
-// Arabic number agreement: 1 منتج واحد، 2 منتجان، 3–10 منتجات، 11+ منتج
-function arCount(n: number, [one, two, few, many]: [string, string, string, string]) {
-  if (n === 1) return one;
-  if (n === 2) return two;
-  if (n >= 3 && n <= 10) return `${n} ${few}`;
-  return `${n} ${many}`;
-}
-
 function Home() {
-  const { data: menu } = useSuspenseQuery(menuQuery);
-  const { data: story } = useSuspenseQuery(storyQuery);
-  const { data: categoryInfo } = useSuspenseQuery(categoriesQuery);
+  // The page arrives with its data already loaded (see `loader` above). Handing that data to
+  // the queries lets the page start working at once; before, the browser downloaded all three
+  // lists a second time first, and nothing on the page responded until that finished.
+  const [menuFromPage, storyFromPage, categoriesFromPage] = Route.useLoaderData();
+  const { data: menu } = useSuspenseQuery({ ...menuQuery, initialData: menuFromPage });
+  const { data: story } = useSuspenseQuery({ ...storyQuery, initialData: storyFromPage });
+  const { data: categoryInfo } = useSuspenseQuery({
+    ...categoriesQuery,
+    initialData: categoriesFromPage,
+  });
   const { cat, p, panel } = Route.useSearch();
   const navigate = useNavigate();
   const closeLayer = useCloseLayer();
@@ -91,6 +95,7 @@ function Home() {
   const [limitHit, setLimitHit] = useState<string | null>(null);
   const [menuPrompt, setMenuPrompt] = useState(false);
   const [query, setQuery] = useState("");
+  const [order, setOrder] = useState<NameOrder>("az");
   const shopRef = useRef<HTMLElement>(null);
 
   const available = useMemo(() => menu.filter((m) => m.is_available), [menu]);
@@ -134,13 +139,18 @@ function Home() {
       const items = available.filter((m) => m.category === name);
       const photo =
         categoryInfo.find((c) => c.name === name)?.image_url ??
-        items.find((m) => m.image_url)?.image_url ??
+        items.map(coverImage).find(Boolean) ??
         null;
       return { name, items, photo };
     });
   }, [available, categoryInfo]);
 
   const activeCategory = categories.find((c) => c.name === cat) ?? null;
+  // Products inside a category are listed alphabetically (أ–ي by default).
+  const categoryItems = useMemo(
+    () => (activeCategory ? sortByName(activeCategory.items, order) : []),
+    [activeCategory, order],
+  );
 
   const searchIndex = useMemo(() => buildSearchIndex(available), [available]);
   const results = useMemo(
@@ -225,7 +235,7 @@ function Home() {
         id: item.id,
         name: item.name,
         price: effectivePrice(item),
-        image_url: item.image_url,
+        image_url: coverImage(item),
         ...(item.sale_price !== null ? { regular_price: Number(item.price) } : {}),
       },
       qty,
@@ -248,7 +258,7 @@ function Home() {
         id: item.id,
         name: item.name,
         price: discount ? discount.price : effectivePrice(item),
-        image_url: valueImage ?? item.image_url,
+        image_url: valueImage ?? coverImage(item),
         options,
         ...(discount ? { discount_code: discount.code } : {}),
         ...(discount || item.sale_price !== null ? { regular_price: Number(item.price) } : {}),
@@ -291,6 +301,7 @@ function Home() {
         {items.map((item) => {
           const soldOut = item.stock === 0;
           const firstVariable = item.variables[0];
+          const cover = coverImage(item);
           return (
             <li key={item.id} className={soldOut ? "opacity-60" : ""}>
               <div className="relative">
@@ -298,13 +309,11 @@ function Home() {
                   type="button"
                   onClick={() => setSheetItem(item)}
                   aria-label={item.name}
-                  className="block aspect-[3/4] w-full overflow-hidden rounded-2xl bg-muted"
+                  className="photo-slot block aspect-[3/4] w-full overflow-hidden rounded-2xl bg-muted"
                 >
-                  {item.image_url && (
-                    <img
-                      src={item.image_url}
-                      alt=""
-                      loading="lazy"
+                  {cover && (
+                    <Photo
+                      src={cover}
                       className={`h-full w-full object-cover ${soldOut ? "grayscale" : ""}`}
                     />
                   )}
@@ -448,7 +457,9 @@ function Home() {
         )}
         <div className="mx-auto grid max-w-5xl gap-12 px-5 pt-12 pb-16 md:grid-cols-[1.15fr_1fr] md:items-center md:pb-20">
           <div>
-            <p className="text-[15px] font-medium text-white/90">{story.hero_title}</p>
+            {story.hero_title && (
+              <p className="text-[15px] font-medium text-white/90">{story.hero_title}</p>
+            )}
             {/* set like the logo: heavy GLAMOUR, signature "With Jannat" tucked under it */}
             <h1 dir="ltr" className="mt-3 text-right">
               <span className="font-logo block text-[clamp(2.6rem,15.5vw,4.25rem)] leading-[0.95] font-black tracking-tight whitespace-nowrap md:text-[6.5vw] lg:text-[5.25rem]">
@@ -458,9 +469,11 @@ function Home() {
                 With Jannat
               </span>
             </h1>
-            <p className="mt-6 max-w-md text-[17px] leading-8 text-white/90">
-              {story.hero_subtitle}
-            </p>
+            {story.hero_subtitle && (
+              <p className="mt-6 max-w-md text-[17px] leading-8 text-white/90">
+                {story.hero_subtitle}
+              </p>
+            )}
             <button
               type="button"
               onClick={() => showCategory()}
@@ -563,12 +576,12 @@ function Home() {
 
           {results ? (
             results.length > 0 ? (
-              <>
+              <PhotoGroup key="search">
                 <p className="text-sm text-muted-foreground">
                   {arCount(results.length, ["نتيجة واحدة", "نتيجتان", "نتائج", "نتيجة"])}
                 </p>
                 {renderProductGrid(results, true)}
-              </>
+              </PhotoGroup>
             ) : (
               <div className="py-12 text-center">
                 <p className="text-lg text-ink">لا توجد نتائج لـ «{query.trim()}»</p>
@@ -585,12 +598,15 @@ function Home() {
               </div>
             )
           ) : activeCategory ? (
-            <>
-              <h2 className="text-2xl text-ink">{activeCategory.name}</h2>
-              {renderProductGrid(activeCategory.items)}
-            </>
+            <PhotoGroup key={`cat:${activeCategory.name}`}>
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="min-w-0 text-2xl text-ink">{activeCategory.name}</h2>
+                {categoryItems.length > 1 && <SortToggle value={order} onChange={setOrder} />}
+              </div>
+              {renderProductGrid(categoryItems)}
+            </PhotoGroup>
           ) : (
-            <>
+            <PhotoGroup key="categories">
               <h2 className="text-2xl text-ink">تسوّقي حسب القسم</h2>
               {categories.length === 0 ? (
                 <p className="py-12 text-center text-muted-foreground">لا توجد منتجات بعد</p>
@@ -604,14 +620,11 @@ function Home() {
                       className="group text-start"
                     >
                       <span className="block truncate text-base font-bold text-ink">{c.name}</span>
-                      <span className="mt-2 block aspect-square overflow-hidden rounded-2xl border border-border bg-muted">
+                      <span className="photo-slot mt-2 block aspect-square overflow-hidden rounded-2xl border border-border bg-muted">
                         {c.photo ? (
-                          <img
-                            src={c.photo}
-                            alt=""
-                            loading="lazy"
-                            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-                          />
+                          <span className="block h-full w-full transition-transform duration-500 group-hover:scale-105">
+                            <Photo src={c.photo} className="h-full w-full object-cover" />
+                          </span>
                         ) : (
                           <span className="flex h-full items-center justify-center text-5xl font-extrabold text-primary/35">
                             {c.name.slice(0, 1)}
@@ -625,17 +638,27 @@ function Home() {
                   ))}
                 </div>
               )}
-            </>
+            </PhotoGroup>
           )}
         </div>
       </section>
 
-      {/* story */}
-      <section className="border-t border-border bg-secondary px-5 py-16 text-center">
-        <p className="text-sm font-bold text-primary">{story.story_label}</p>
-        <h2 className="mt-3 text-3xl text-ink">{story.story_title}</h2>
-        <p className="mx-auto mt-4 max-w-xl leading-8 text-muted-foreground">{story.story_text}</p>
-      </section>
+      {/* story — every line is optional; with all three empty the section isn't there at all */}
+      {(story.story_label || story.story_title || story.story_text) && (
+        <section className="border-t border-border bg-secondary px-5 py-16 text-center">
+          <div className="space-y-3">
+            {story.story_label && (
+              <p className="text-sm font-bold text-primary">{story.story_label}</p>
+            )}
+            {story.story_title && <h2 className="text-3xl text-ink">{story.story_title}</h2>}
+            {story.story_text && (
+              <p className="mx-auto max-w-xl pt-1 leading-8 text-muted-foreground">
+                {story.story_text}
+              </p>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* contact */}
       <footer className="bg-ink px-5 pt-14 pb-10 text-center text-white">
