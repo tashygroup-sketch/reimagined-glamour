@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
-import { checkDiscountCode, effectivePrice, type MenuItem } from "@/lib/shop.functions";
+import { checkDiscountCode, coverImage, effectivePrice, type MenuItem } from "@/lib/shop.functions";
 import { useCart, type CartOption } from "@/lib/cart";
 import { Carousel } from "@/components/Carousel";
 import { useLockScroll } from "@/lib/back-layer";
@@ -149,6 +149,9 @@ export function ProductSheet({
     item.image_url ? { url: item.image_url, ratio: item.image_ratio } : null,
     ...item.extra_images.map((url, i) => ({ url, ratio: item.extra_image_ratios[i] ?? null })),
   ].filter((x): x is { url: string; ratio: number | null } => x !== null);
+  // No main or extra photos, but a value (colour) has one: show that instead of nothing.
+  const fallbackCover = gallery.length === 0 ? coverImage(item) : null;
+  if (fallbackCover) gallery.push({ url: fallbackCover, ratio: null });
 
   async function applyCode() {
     if (!item || !codeInput.trim()) return;

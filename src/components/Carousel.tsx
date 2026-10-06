@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Photo } from "@/components/Photo";
 
 export type CarouselImage = { url: string; ratio?: number | null };
 
@@ -35,7 +36,7 @@ function Slide({
   useFallbackRatio(image.url, known !== null, onMeasured);
   return (
     <div data-slide className="w-full shrink-0 snap-center">
-      <img src={image.url} alt="" className="h-full w-full object-contain" />
+      <Photo src={image.url} className="h-full w-full object-contain" />
     </div>
   );
 }
