@@ -267,6 +267,24 @@
   }
 }
 
+/* ---------- photos ---------- */
+/* The box of a photo that hasn't arrived yet pulses softly, so it reads as "loading" rather
+   than "missing" (see src/components/Photo.tsx). */
+@keyframes photo-wait {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .photo-slot:has(img[data-photo="loading"]) {
+    animation: photo-wait 1.4s ease-in-out infinite;
+  }
+}
+
 /* ---------- iPhone ---------- */
 /* iPhone zooms the whole page into any text field smaller than 16px and stays zoomed. That
    is what made the crop screen get stuck: it opened while zoomed in, with its buttons off
