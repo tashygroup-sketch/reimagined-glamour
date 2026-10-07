@@ -13,13 +13,14 @@ import {
 import { LogoIntro } from "@/components/LogoIntro";
 import { Carousel } from "@/components/Carousel";
 import { Photo, PhotoGroup } from "@/components/Photo";
-import { SortToggle } from "@/components/SortToggle";
+import { LetterPicker } from "@/components/LetterPicker";
 import { BookingDialog } from "@/components/BookingDialog";
 import { ProductSheet, formatPrice, type AppliedDiscount } from "@/components/ProductSheet";
 import { SocialLinks } from "@/components/SocialLinks";
 import { optionsLabel, useCart, type CartOption } from "@/lib/cart";
 import { buildSearchIndex, searchProducts } from "@/lib/search";
-import { sortByName, type NameOrder } from "@/lib/sort";
+import { letterOf, sortByName } from "@/lib/sort";
+import { preloadAll, thumbUrl } from "@/lib/photos";
 import { arCount } from "@/lib/utils";
 import { keepLayer, useCloseLayer, useLockScroll, withLayer } from "@/lib/back-layer";
 import { overStockValue, remainingForChoice } from "@/lib/stock";
@@ -95,7 +96,8 @@ function Home() {
   const [limitHit, setLimitHit] = useState<string | null>(null);
   const [menuPrompt, setMenuPrompt] = useState(false);
   const [query, setQuery] = useState("");
-  const [order, setOrder] = useState<NameOrder>("az");
+  // the product the customer just jumped to with the letter list (outlined for a moment)
+  const [jumpedTo, setJumpedTo] = useState<string | null>(null);
   const shopRef = useRef<HTMLElement>(null);
 
   const available = useMemo(() => menu.filter((m) => m.is_available), [menu]);
@@ -146,11 +148,47 @@ function Home() {
   }, [available, categoryInfo]);
 
   const activeCategory = categories.find((c) => c.name === cat) ?? null;
-  // Products inside a category are listed alphabetically (أ–ي by default).
+  // Products inside a category are listed alphabetically.
   const categoryItems = useMemo(
-    () => (activeCategory ? sortByName(activeCategory.items, order) : []),
-    [activeCategory, order],
+    () => (activeCategory ? sortByName(activeCategory.items) : []),
+    [activeCategory],
   );
+  const categoryLetters = useMemo(
+    () => [...new Set(categoryItems.map((m) => letterOf(m.name)))],
+    [categoryItems],
+  );
+
+  // Letter list → scroll to the first product that starts with the chosen letter.
+  function jumpToLetter(letter: string) {
+    const target = categoryItems.find((m) => letterOf(m.name) === letter);
+    if (!target) return;
+    document
+      .getElementById(`product-${target.id}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    flash(setJumpedTo, target.id, 1800);
+  }
+
+  // Fetch the light copies of every category and product photo in the background, in the
+  // order they're shown, so a category's photos are already on the phone when it's opened
+  // and appear at once. Skipped for customers who asked their phone to save data.
+  useEffect(() => {
+    const saveData = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection
+      ?.saveData;
+    if (saveData) return;
+    const urls: string[] = [];
+    for (const c of categories) urls.push(thumbUrl(c.photo) ?? "");
+    for (const c of categories)
+      for (const m of sortByName(c.items)) urls.push(thumbUrl(coverImage(m)) ?? "");
+    let stop = () => {};
+    // a moment's head start for the photos already on screen
+    const timer = window.setTimeout(() => {
+      stop = preloadAll(urls.filter(Boolean));
+    }, 300);
+    return () => {
+      window.clearTimeout(timer);
+      stop();
+    };
+  }, [categories]);
 
   const searchIndex = useMemo(() => buildSearchIndex(available), [available]);
   const results = useMemo(
@@ -303,7 +341,13 @@ function Home() {
           const firstVariable = item.variables[0];
           const cover = coverImage(item);
           return (
-            <li key={item.id} className={soldOut ? "opacity-60" : ""}>
+            <li
+              key={item.id}
+              id={`product-${item.id}`}
+              className={`scroll-mt-48 rounded-2xl transition-shadow duration-300 ${
+                soldOut ? "opacity-60" : ""
+              } ${jumpedTo === item.id ? "ring-2 ring-primary ring-offset-4 ring-offset-background" : ""}`}
+            >
               <div className="relative">
                 <button
                   type="button"
@@ -313,6 +357,7 @@ function Home() {
                 >
                   {cover && (
                     <Photo
+                      thumb
                       src={cover}
                       className={`h-full w-full object-cover ${soldOut ? "grayscale" : ""}`}
                     />
@@ -510,29 +555,40 @@ function Home() {
       <section id="menu" ref={shopRef} className="scroll-mt-14">
         <div className="sticky top-14 z-20 border-b border-border/70 bg-background/95 backdrop-blur-md">
           <div className="mx-auto max-w-5xl px-4 py-3">
-            <label className="relative block">
-              <span className="sr-only">ابحثي عن منتج</span>
-              <Search className="pointer-events-none absolute top-1/2 right-4 h-5 w-5 -translate-y-1/2 text-muted-foreground" />
-              <input
-                type="search"
-                dir="auto"
-                enterKeyHint="search"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="ابحثي عن منتج، لون أو قسم / Search"
-                className="h-12 w-full rounded-full border border-border bg-card ps-11 pe-11 text-[16px] text-ink outline-none placeholder:text-muted-foreground focus:border-primary"
-              />
-              {query && (
-                <button
-                  type="button"
-                  onClick={() => setQuery("")}
-                  aria-label="مسح البحث"
-                  className="absolute top-1/2 left-2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-muted"
-                >
-                  <X className="h-4 w-4" />
-                </button>
+            {/* The letter list sits here, in the bar that stays on screen, so another letter
+                can be picked from anywhere in a long category without scrolling back up. */}
+            <div className="flex items-center gap-2">
+              <label className="relative block min-w-0 flex-1">
+                <span className="sr-only">ابحثي عن منتج</span>
+                <Search className="pointer-events-none absolute top-1/2 right-4 h-5 w-5 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="search"
+                  dir="auto"
+                  enterKeyHint="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={
+                    activeCategory && !results && categoryLetters.length > 1
+                      ? "ابحثي عن منتج / Search"
+                      : "ابحثي عن منتج، لون أو قسم / Search"
+                  }
+                  className="h-12 w-full rounded-full border border-border bg-card ps-11 pe-11 text-[16px] text-ink outline-none placeholder:text-muted-foreground focus:border-primary"
+                />
+                {query && (
+                  <button
+                    type="button"
+                    onClick={() => setQuery("")}
+                    aria-label="مسح البحث"
+                    className="absolute top-1/2 left-2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-muted"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </label>
+              {activeCategory && !results && categoryLetters.length > 1 && (
+                <LetterPicker letters={categoryLetters} onPick={jumpToLetter} />
               )}
-            </label>
+            </div>
 
             {activeCategory && !results && (
               <div className="scrollbar-none -mx-4 mt-3 flex items-center gap-2 overflow-x-auto px-4">
@@ -599,10 +655,7 @@ function Home() {
             )
           ) : activeCategory ? (
             <PhotoGroup key={`cat:${activeCategory.name}`}>
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="min-w-0 text-2xl text-ink">{activeCategory.name}</h2>
-                {categoryItems.length > 1 && <SortToggle value={order} onChange={setOrder} />}
-              </div>
+              <h2 className="text-2xl text-ink">{activeCategory.name}</h2>
               {renderProductGrid(categoryItems)}
             </PhotoGroup>
           ) : (
@@ -623,7 +676,7 @@ function Home() {
                       <span className="photo-slot mt-2 block aspect-square overflow-hidden rounded-2xl border border-border bg-muted">
                         {c.photo ? (
                           <span className="block h-full w-full transition-transform duration-500 group-hover:scale-105">
-                            <Photo src={c.photo} className="h-full w-full object-cover" />
+                            <Photo thumb src={c.photo} className="h-full w-full object-cover" />
                           </span>
                         ) : (
                           <span className="flex h-full items-center justify-center text-5xl font-extrabold text-primary/35">
@@ -730,9 +783,9 @@ function Home() {
                     return (
                       <div key={l.key} className="flex items-center gap-3">
                         {l.image_url && (
-                          <img
+                          <Photo
+                            thumb
                             src={l.image_url}
-                            alt=""
                             className="h-14 w-14 shrink-0 rounded-2xl object-cover"
                           />
                         )}
