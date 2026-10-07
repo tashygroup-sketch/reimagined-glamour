@@ -3,6 +3,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { checkDiscountCode, coverImage, effectivePrice, type MenuItem } from "@/lib/shop.functions";
 import { useCart, type CartOption } from "@/lib/cart";
 import { Carousel } from "@/components/Carousel";
+import { Photo } from "@/components/Photo";
 import { useLockScroll } from "@/lib/back-layer";
 import { cartQtyOfProduct, remainingForChoice, valueRemaining, valueStock } from "@/lib/stock";
 
@@ -305,9 +306,9 @@ export function ProductSheet({
                         } ${val.image_url ? "ps-1.5" : "px-4"}`}
                       >
                         {val.image_url && (
-                          <img
+                          <Photo
+                            thumb
                             src={val.image_url}
-                            alt=""
                             className={`h-8 w-8 rounded-full object-cover ${unavailable ? "grayscale" : ""}`}
                           />
                         )}

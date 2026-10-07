@@ -7,9 +7,15 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { isLoaded, isMissing, markLoaded, markMissing, thumbUrl } from "@/lib/photos";
 
 // Product and category photos.
 //
+//  * `thumb`: shows the photo's light copy (see src/lib/photos.ts) — what cards, category
+//    squares and other small spots use. If the light copy doesn't exist yet, the full photo
+//    is shown instead.
+//  * A photo this page has already downloaded (the shop fetches the light copies in the
+//    background) is shown instantly: no empty box, no fade.
 //  * Never lazy: every photo of the list on screen starts downloading right away, instead of
 //    one by one as the customer scrolls (which looked like "some photos are missing").
 //  * A photo that fails to download (weak phone signal) is tried again by itself a few times,
@@ -82,29 +88,45 @@ export function PhotoGroup({ children, capMs = 4000 }: { children: ReactNode; ca
   return <GateContext.Provider value={gate}>{children}</GateContext.Provider>;
 }
 
-type PhotoProps = { src: string; alt?: string; className?: string };
+type PhotoProps = {
+  src: string;
+  alt?: string;
+  className?: string;
+  // show the light copy when there is one
+  thumb?: boolean;
+  // shown in place of a photo that could not be downloaded at all
+  fallback?: ReactNode;
+};
 
 // A different photo starts from scratch (its own loading state and retries).
 export function Photo(props: PhotoProps) {
   return <PhotoInner key={props.src} {...props} />;
 }
 
-function PhotoInner({ src, alt = "", className = "" }: PhotoProps) {
+function PhotoInner({ src, alt = "", className = "", thumb = false, fallback }: PhotoProps) {
   const gate = useContext(GateContext);
   // false on the server: photos are revealed by the browser once they have really arrived
   const open = useSyncExternalStore(gate.subscribe, gate.isOpen, () => false);
   const ref = useRef<HTMLImageElement>(null);
   const token = useRef<object | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const small = thumb ? thumbUrl(src) : null;
+  // Start with the light copy unless this page already found out it doesn't exist.
+  const [useSmall, setUseSmall] = useState(() => small !== null && !isMissing(small));
+  const base = useSmall && small ? small : src;
   const [attempt, setAttempt] = useState(0);
-  const [status, setStatus] = useState<"loading" | "loaded" | "failed">("loading");
-  const [shown, setShown] = useState(false);
+  // Already downloaded by this page: visible from the first moment.
+  const [instant] = useState(() => isLoaded(base));
+  const [status, setStatus] = useState<"loading" | "loaded" | "failed">(
+    instant ? "loaded" : "loading",
+  );
+  const [shown, setShown] = useState(instant);
 
   // A retry asks for the same file under a slightly different address, so the browser really
   // downloads it again instead of repeating the failure it remembers.
-  const canRetry = !/^(blob|data):/i.test(src);
+  const canRetry = !/^(blob|data):/i.test(base);
   const url =
-    attempt === 0 || !canRetry ? src : `${src}${src.includes("?") ? "&" : "?"}retry=${attempt}`;
+    attempt === 0 || !canRetry ? base : `${base}${base.includes("?") ? "&" : "?"}retry=${attempt}`;
 
   // This photo no longer keeps the others of its group waiting.
   function release() {
@@ -117,7 +139,19 @@ function PhotoInner({ src, alt = "", className = "" }: PhotoProps) {
     release();
   }
 
+  function handleLoad() {
+    markLoaded(base);
+    settle("loaded");
+  }
+
   function handleError() {
+    if (useSmall && small) {
+      // No light copy (yet): show the full photo instead. The group keeps waiting for it.
+      markMissing(small);
+      setUseSmall(false);
+      setAttempt(0);
+      return;
+    }
     release();
     const delay = canRetry ? RETRY_DELAYS[attempt] : undefined;
     if (delay === undefined) {
@@ -129,6 +163,7 @@ function PhotoInner({ src, alt = "", className = "" }: PhotoProps) {
   }
 
   useEffect(() => {
+    if (instant) return;
     const mine = {};
     token.current = mine;
     gate.add(mine);
@@ -136,7 +171,7 @@ function PhotoInner({ src, alt = "", className = "" }: PhotoProps) {
     // the page's HTML, or it's in the browser's memory): read the result directly.
     const el = ref.current;
     if (el?.complete) {
-      if (el.naturalWidth > 0) settle("loaded");
+      if (el.naturalWidth > 0) handleLoad();
       else handleError();
     }
     return () => {
@@ -162,16 +197,20 @@ function PhotoInner({ src, alt = "", className = "" }: PhotoProps) {
     if (status === "loaded" && open) setShown(true);
   }, [status, open]);
 
+  if (status === "failed" && fallback !== undefined) return <>{fallback}</>;
+
   return (
     <img
       ref={ref}
       src={url}
       alt={alt}
-      decoding="async"
+      decoding={instant ? "sync" : "async"}
       data-photo={shown ? "shown" : status === "failed" ? "failed" : "loading"}
-      onLoad={() => settle("loaded")}
+      onLoad={handleLoad}
       onError={handleError}
-      className={`${className} transition-opacity duration-300 ${shown ? "opacity-100" : "opacity-0"}`}
+      className={`${className} ${instant ? "" : "transition-opacity duration-300"} ${
+        shown ? "opacity-100" : "opacity-0"
+      }`}
     />
   );
 }

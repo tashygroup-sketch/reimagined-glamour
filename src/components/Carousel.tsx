@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Photo } from "@/components/Photo";
+import { isLoaded, thumbUrl } from "@/lib/photos";
 
 export type CarouselImage = { url: string; ratio?: number | null };
 
@@ -34,8 +35,16 @@ function Slide({
 }) {
   const known = typeof image.ratio === "number" ? image.ratio : null;
   useFallbackRatio(image.url, known !== null, onMeasured);
+  // The product page opens with the light copy the card was already showing, and the full
+  // photo replaces it as soon as it has arrived — instead of an empty box in between.
+  const small = thumbUrl(image.url);
+  const [underlay] = useState(() => (small && isLoaded(small) ? small : null));
   return (
-    <div data-slide className="w-full shrink-0 snap-center">
+    <div
+      data-slide
+      className="w-full shrink-0 snap-center bg-contain bg-center bg-no-repeat"
+      style={underlay ? { backgroundImage: `url("${underlay}")` } : undefined}
+    >
       <Photo src={image.url} className="h-full w-full object-contain" />
     </div>
   );
