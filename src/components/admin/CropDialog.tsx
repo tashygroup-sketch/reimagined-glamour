@@ -3,7 +3,13 @@ import Cropper from "react-easy-crop";
 import { CROP_HEIGHT, CROP_WIDTH, cropToBase64, prepareImage, type CropArea } from "@/lib/image";
 import { useBackClose, useLockScroll } from "@/lib/back-layer";
 
-export type CroppedImage = { base64: string; contentType: string; filename: string };
+// `thumbBase64` = the light copy shown on cards (see src/lib/photos.ts).
+export type CroppedImage = {
+  base64: string;
+  contentType: string;
+  filename: string;
+  thumbBase64?: string;
+};
 
 // Output size decides the shape: 960×1280 (3:4) for product and ad photos by default,
 // or e.g. SQUARE_CROP for category photos.
@@ -66,14 +72,19 @@ export function CropDialog({
     setBusy(true);
     setError(null);
     try {
-      const { base64, contentType } = await cropToBase64(
+      const { base64, contentType, thumbBase64 } = await cropToBase64(
         prepared.blob,
         area,
         0.88,
         output.width,
         output.height,
       );
-      onDone({ base64, contentType, filename: file.name.replace(/\.[^.]+$/, "") + ".jpg" });
+      onDone({
+        base64,
+        contentType,
+        ...(thumbBase64 ? { thumbBase64 } : {}),
+        filename: file.name.replace(/\.[^.]+$/, "") + ".jpg",
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "تعذّر قص الصورة");
       setBusy(false);

@@ -8,8 +8,10 @@ import {
   getMenu,
   getCategories,
   getDiscountsAdmin,
+  fetchPhotoForThumb,
   saveCategoryImage,
   saveMenuItem,
+  saveThumbnail,
   deleteMenuItem,
   uploadMenuImage,
   type AdminDiscount,
@@ -20,10 +22,11 @@ import { SQUARE_CROP, withUploadRetry } from "@/lib/image";
 import { parseStock } from "@/lib/stock";
 import { useCloseLayer, withLayer } from "@/lib/back-layer";
 import { buildSearchIndex, searchProducts } from "@/lib/search";
-import { sortByName, type NameOrder } from "@/lib/sort";
+import { letterOf, sortByName } from "@/lib/sort";
+import { ensureThumbs, type ThumbJob, type ThumbProgress } from "@/lib/thumbs";
 import { arCount } from "@/lib/utils";
 import { Photo, PhotoGroup } from "@/components/Photo";
-import { SortToggle } from "@/components/SortToggle";
+import { LetterPicker } from "@/components/LetterPicker";
 import { CropDialog, type CroppedImage } from "./CropDialog";
 import { MenuItemForm, type MenuItemDraft } from "./MenuItemForm";
 import { Reveal } from "@/components/Reveal";
@@ -37,6 +40,8 @@ export function MenuPanel({ phone }: { phone: string }) {
   const fetchCategories = useServerFn(getCategories);
   const setCategoryImage = useServerFn(saveCategoryImage);
   const fetchDiscounts = useServerFn(getDiscountsAdmin);
+  const storeThumb = useServerFn(saveThumbnail);
+  const photoViaServer = useServerFn(fetchPhotoForThumb);
   const queryClient = useQueryClient();
 
   const [items, setItems] = useState<MenuItem[] | null>(null);
@@ -49,7 +54,9 @@ export function MenuPanel({ phone }: { phone: string }) {
   const [busy, setBusy] = useState(false);
   // Same search as the shop (Arabic, English, Arabizi, typos), over every product here.
   const [query, setQuery] = useState("");
-  const [order, setOrder] = useState<NameOrder>("az");
+  // the product just jumped to with the letter list (outlined for a moment)
+  const [jumpedTo, setJumpedTo] = useState<string | null>(null);
+  const [thumbs, setThumbs] = useState<ThumbProgress | null>(null);
   const searchIndex = useMemo(() => buildSearchIndex(items ?? []), [items]);
   const results = useMemo(
     () => (query.trim() ? searchProducts(searchIndex, query) : null),
@@ -104,6 +111,58 @@ export function MenuPanel({ phone }: { phone: string }) {
 
   const categories = [...new Set((items ?? []).map((i) => i.category))];
 
+  // While this panel is open: make the light copy of every photo that doesn't have one yet
+  // (photos uploaded before light copies existed), and find photos whose file is gone.
+  useEffect(() => {
+    if (!items) return;
+    const jobs: ThumbJob[] = [];
+    for (const c of categoryInfo) {
+      if (c.image_url) jobs.push({ url: c.image_url, label: `صورة قسم «${c.name}»` });
+    }
+    for (const item of items) {
+      const cover = coverImage(item);
+      if (cover) jobs.push({ url: cover, label: item.name });
+      for (const v of item.variables) {
+        for (const x of v.values) {
+          if (x.image_url) jobs.push({ url: x.image_url, label: `${item.name} — ${x.label}` });
+        }
+      }
+    }
+    let stopped = false;
+    void ensureThumbs(
+      jobs,
+      {
+        save: (url, dataBase64) => storeThumb({ data: { phone, url, dataBase64 } }),
+        viaServer: (url) => photoViaServer({ data: { phone, url } }),
+      },
+      (p) => {
+        if (!stopped) setThumbs(p);
+      },
+      () => stopped,
+    );
+    return () => {
+      stopped = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, categoryInfo]);
+
+  // The page order: categories as listed, products alphabetical inside each.
+  const letters = [...new Set((items ?? []).map((i) => letterOf(i.name)))];
+  function jumpToLetter(letter: string) {
+    for (const cat of categories) {
+      const target = sortByName((items ?? []).filter((i) => i.category === cat)).find(
+        (i) => letterOf(i.name) === letter,
+      );
+      if (!target) continue;
+      document
+        .getElementById(`admin-item-${target.id}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      setJumpedTo(target.id);
+      window.setTimeout(() => setJumpedTo(null), 1800);
+      return;
+    }
+  }
+
   function nextSortOrderFor(category: string) {
     const inCategory = (items ?? []).filter((i) => i.category === category);
     if (inCategory.length === 0) return 1;
@@ -134,6 +193,7 @@ export function MenuPanel({ phone }: { phone: string }) {
               filename: image.filename,
               contentType: image.contentType,
               dataBase64: image.base64,
+              ...(image.thumbBase64 ? { thumbBase64: image.thumbBase64 } : {}),
             },
           }),
         );
@@ -158,6 +218,7 @@ export function MenuPanel({ phone }: { phone: string }) {
           filename: image.filename,
           contentType: image.contentType,
           dataBase64: image.base64,
+          ...(image.thumbBase64 ? { thumbBase64: image.thumbBase64 } : {}),
         },
       }),
     );
@@ -259,7 +320,10 @@ export function MenuPanel({ phone }: { phone: string }) {
     return (
       <article
         key={item.id}
-        className="overflow-hidden rounded-3xl bg-card shadow-[var(--shadow-card)]"
+        id={`admin-item-${item.id}`}
+        className={`scroll-mt-24 overflow-hidden rounded-3xl bg-card shadow-[var(--shadow-card)] transition-shadow duration-300 ${
+          jumpedTo === item.id ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""
+        }`}
       >
         {cover ? (
           // fixed height: the card doesn't jump when its photo arrives
@@ -268,7 +332,17 @@ export function MenuPanel({ phone }: { phone: string }) {
               item.stock === 0 ? "opacity-50 grayscale" : ""
             }`}
           >
-            <Photo src={cover} alt={item.name} className="h-full w-full object-contain" />
+            <Photo
+              thumb
+              src={cover}
+              alt={item.name}
+              className="h-full w-full object-contain"
+              fallback={
+                <p className="flex h-full items-center justify-center px-4 text-center text-sm leading-6 text-destructive">
+                  تعذّر تحميل هذه الصورة — اضغطي «تعديل» وارفعيها من جديد
+                </p>
+              }
+            />
           </div>
         ) : (
           <div className="flex h-36 w-full items-center justify-center bg-muted text-sm text-muted-foreground">
@@ -381,7 +455,7 @@ export function MenuPanel({ phone }: { phone: string }) {
               enterKeyHint="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="ابحثي في منتجاتك: اسم، لون أو قسم / Search"
+              placeholder="ابحثي في منتجاتك / Search"
               className="h-12 w-full rounded-full border border-border bg-card ps-11 pe-11 text-[16px] text-ink outline-none placeholder:text-muted-foreground focus:border-primary"
             />
             {query && (
@@ -395,7 +469,35 @@ export function MenuPanel({ phone }: { phone: string }) {
               </button>
             )}
           </label>
-          {!results && items.length > 1 && <SortToggle value={order} onChange={setOrder} />}
+          {!results && letters.length > 1 && (
+            <LetterPicker letters={letters} onPick={jumpToLetter} />
+          )}
+        </div>
+      )}
+
+      {/* Light copies being made for older photos, and photos whose file is gone. */}
+      {thumbs && thumbs.left > 0 && thumbs.made > 0 && (
+        <p role="status" className="rounded-2xl bg-accent px-4 py-3 text-sm text-accent-foreground">
+          جارِ تجهيز نسخ خفيفة وسريعة من الصور… بقي {thumbs.left}. أبقي هذه الصفحة مفتوحة حتى تنتهي.
+        </p>
+      )}
+      {thumbs && thumbs.left === 0 && thumbs.made > 0 && (
+        <p role="status" className="rounded-2xl bg-accent px-4 py-3 text-sm text-accent-foreground">
+          ✓ تم تجهيز نسخ خفيفة لـ {thumbs.made} صورة — ستظهر الآن في الموقع بسرعة.
+        </p>
+      )}
+      {thumbs && thumbs.left === 0 && thumbs.broken.length > 0 && (
+        <div className="rounded-2xl border border-destructive/40 bg-card px-4 py-3 text-sm">
+          <p className="font-bold text-destructive">
+            صور لا تعمل ({thumbs.broken.length}) — هذه لا تظهر في الموقع، ارفعيها من جديد:
+          </p>
+          <ul className="mt-1 list-inside list-disc text-ink">
+            {thumbs.broken.map((b, i) => (
+              <li key={i}>
+                {b.label} <span className="text-xs text-muted-foreground">({b.reason})</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -457,7 +559,11 @@ export function MenuPanel({ phone }: { phone: string }) {
                 <div className="mb-3 flex items-center gap-3">
                   <label className="photo-slot relative flex h-16 w-16 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border border-dashed border-primary/60 bg-muted text-center text-[10px] leading-4 text-primary">
                     {categoryImage(cat) ? (
-                      <Photo src={categoryImage(cat)!} className="h-full w-full object-cover" />
+                      <Photo
+                        thumb
+                        src={categoryImage(cat)!}
+                        className="h-full w-full object-cover"
+                      />
                     ) : categoryBusy === cat ? (
                       "..."
                     ) : (
@@ -497,10 +603,9 @@ export function MenuPanel({ phone }: { phone: string }) {
                   )}
                 </div>
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {sortByName(
-                    items.filter((item) => item.category === cat),
-                    order,
-                  ).map((item) => renderItem(item))}
+                  {sortByName(items.filter((item) => item.category === cat)).map((item) =>
+                    renderItem(item),
+                  )}
                 </div>
               </div>
             ))}
