@@ -1,3 +1,5 @@
+import { THUMB_MAX_HEIGHT, THUMB_MAX_WIDTH } from "@/lib/photos";
+
 // ---------- photo processing (runs in the browser) ----------
 //
 // Written for iPhone Safari, which is where uploads were failing:
@@ -20,6 +22,14 @@ export const CROP_ASPECT = CROP_WIDTH / CROP_HEIGHT;
 export const SQUARE_CROP = { width: 900, height: 900 } as const;
 
 export type CropArea = { x: number; y: number; width: number; height: number };
+
+// Light copies for cards (see src/lib/photos.ts): the photo scaled to fit inside this box.
+const THUMB_QUALITY = 0.72;
+
+function thumbSize(w0: number, h0: number) {
+  const scale = Math.min(1, THUMB_MAX_WIDTH / w0, THUMB_MAX_HEIGHT / h0);
+  return { w: Math.max(1, Math.round(w0 * scale)), h: Math.max(1, Math.round(h0 * scale)) };
+}
 
 function loadImage(blob: Blob): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -123,7 +133,24 @@ export async function cropToBase64(
 ) {
   const img = await loadImage(source);
   const blob = await drawToJpeg(img, width, height, quality, area);
-  return { base64: await blobToBase64(blob), contentType: "image/jpeg" };
+  // The light copy for cards is cut from the same area. If it can't be made (phone short on
+  // memory), the upload still goes ahead with the full photo only.
+  let thumbBase64: string | undefined;
+  try {
+    const { w, h } = thumbSize(width, height);
+    thumbBase64 = await blobToBase64(await drawToJpeg(img, w, h, THUMB_QUALITY, area));
+  } catch {
+    thumbBase64 = undefined;
+  }
+  return { base64: await blobToBase64(blob), contentType: "image/jpeg", thumbBase64 };
+}
+
+// A light copy of an already uploaded photo (for photos uploaded before light copies existed).
+export async function makeThumbBase64(photo: Blob): Promise<string> {
+  const img = await loadImage(photo);
+  if (!img.naturalWidth || !img.naturalHeight) throw new Error("ليست صورة صالحة");
+  const { w, h } = thumbSize(img.naturalWidth, img.naturalHeight);
+  return blobToBase64(await drawToJpeg(img, w, h, THUMB_QUALITY));
 }
 
 // Resize + compress without cropping (the hero background photo).

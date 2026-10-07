@@ -742,9 +742,34 @@ export const deleteMenuItem = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+// Uploaded photos never change (each gets a new random name), so phones may keep them for a
+// year: a returning customer sees the photos instantly, without downloading them again.
+const PHOTO_CACHE_SECONDS = "31536000";
+
+// Address prefix of the shop's own uploaded photos. Light copies live in its thumbs/ folder,
+// under the same file name (see src/lib/photos.ts).
+function photoPrefix() {
+  return `${process.env["SUPABASE_URL"]!.replace(/\/+$/, "")}/storage/v1/object/public/menu-photos/`;
+}
+
+// File name of one of the shop's own photos, or null for any other address.
+function ownPhotoName(url: string): string | null {
+  const prefix = photoPrefix();
+  if (typeof url !== "string" || !url.startsWith(prefix)) return null;
+  const name = url.slice(prefix.length);
+  return /^[A-Za-z0-9._-]+$/.test(name) ? name : null;
+}
+
 export const uploadMenuImage = createServerFn({ method: "POST" })
   .inputValidator(
-    (input: { phone: string; filename: string; contentType: string; dataBase64: string }) => {
+    (input: {
+      phone: string;
+      filename: string;
+      contentType: string;
+      dataBase64: string;
+      // the light copy for cards, made by the browser from the same crop
+      thumbBase64?: string;
+    }) => {
       if (!input.dataBase64?.trim()) throw new Error("لا توجد صورة");
       return input;
     },
@@ -757,20 +782,70 @@ export const uploadMenuImage = createServerFn({ method: "POST" })
     const ext =
       (data.filename.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
     const path = `${crypto.randomUUID()}.${ext}`;
-    const { error } = await db.storage
-      .from("menu-photos")
-      // Every upload gets a new random name and is never changed afterwards, so phones may
-      // keep it for a year: a returning customer sees the photos instantly, without
-      // downloading them again.
-      .upload(path, bytes, {
-        contentType: data.contentType || "image/jpeg",
-        upsert: false,
-        cacheControl: "31536000",
-      });
+    const { error } = await db.storage.from("menu-photos").upload(path, bytes, {
+      contentType: data.contentType || "image/jpeg",
+      upsert: false,
+      cacheControl: PHOTO_CACHE_SECONDS,
+    });
     if (error) throw new Error(error.message);
+    if (data.thumbBase64?.trim()) {
+      // Best effort: without it the cards simply show the full photo, and the control panel
+      // creates the missing light copy later.
+      const thumb = Buffer.from(data.thumbBase64, "base64");
+      if (thumb.byteLength <= 400 * 1024) {
+        await db.storage
+          .from("menu-photos")
+          .upload(`thumbs/${path}`, thumb, {
+            contentType: "image/jpeg",
+            upsert: true,
+            cacheControl: PHOTO_CACHE_SECONDS,
+          })
+          .catch(() => null);
+      }
+    }
     const { data: pub } = db.storage.from("menu-photos").getPublicUrl(path);
     const ratio = getImageRatio(bytes);
     return { url: pub.publicUrl, ratio };
+  });
+
+// Stores the light copy of a photo that was uploaded before light copies existed. The copy
+// is made in the owner's browser (src/lib/thumbs.ts); this only saves it next to the photo.
+export const saveThumbnail = createServerFn({ method: "POST" })
+  .inputValidator((input: { phone: string; url: string; dataBase64: string }) => {
+    if (!input.dataBase64?.trim()) throw new Error("لا توجد صورة");
+    return input;
+  })
+  .handler(async ({ data }) => {
+    const db = await adminClient(data.phone);
+    const name = ownPhotoName(data.url);
+    if (!name) throw new Error("ليست من صور المتجر");
+    const bytes = Buffer.from(data.dataBase64, "base64");
+    if (bytes.byteLength > 400 * 1024) throw new Error("النسخة الخفيفة أكبر من المتوقع");
+    const { error } = await db.storage.from("menu-photos").upload(`thumbs/${name}`, bytes, {
+      contentType: "image/jpeg",
+      upsert: true,
+      cacheControl: PHOTO_CACHE_SECONDS,
+    });
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+// Hands one of the shop's own photos to the owner's browser, for when the browser isn't
+// allowed to read it directly from storage. Only the shop's photos, only for the admin.
+export const fetchPhotoForThumb = createServerFn({ method: "POST" })
+  .inputValidator((input: { phone: string; url: string }) => input)
+  .handler(async ({ data }) => {
+    await adminClient(data.phone);
+    if (!ownPhotoName(data.url)) throw new Error("ليست من صور المتجر");
+    const res = await fetch(data.url);
+    if (!res.ok) return { ok: false as const, status: res.status };
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.byteLength > 8 * 1024 * 1024) return { ok: false as const, status: 413 };
+    return {
+      ok: true as const,
+      base64: bytes.toString("base64"),
+      contentType: res.headers.get("content-type") || "image/jpeg",
+    };
   });
 
 const DEFAULT_STORY = {

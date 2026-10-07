@@ -14,7 +14,7 @@ const collator = new Intl.Collator(["ar", "en"], {
 });
 
 const FIRST_LETTER = /\p{L}/u;
-const ARABIC_LETTER = /[؀-ۿ]/;
+const ARABIC_LETTER = /[\u0600-\u06FF]/;
 
 // 0 = starts with an Arabic letter, 1 = any other alphabet. Decided here rather than left
 // to the browser, so every phone puts the two groups in the same order.
@@ -30,4 +30,34 @@ export function compareNames(a: string, b: string): number {
 export function sortByName<T extends { name: string }>(items: T[], order: NameOrder = "az"): T[] {
   const sorted = [...items].sort((a, b) => compareNames(a.name, b.name));
   return order === "za" ? sorted.reverse() : sorted;
+}
+
+// ---------- the letter a name is filed under (for the "jump to a letter" list) ----------
+
+export const ARABIC_LETTERS = [..."ابتثجحخدذرزسشصضطظعغفقكلمنهوي"];
+export const LATIN_LETTERS = [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"];
+// names that start with a number or a symbol
+export const OTHER_LETTER = "#";
+
+const LETTER_ALIASES: Record<string, string> = {
+  ء: "ا",
+  ى: "ي",
+  ة: "ه",
+  پ: "ب",
+  چ: "ج",
+  گ: "ك",
+  ڤ: "ف",
+};
+
+// "أحمر شفاه" → "ا", "إيلاينر" → "ا", "maybelline" → "M", "3D lashes" → "#".
+// أ / إ / آ count as ا, the same way the alphabetical order treats them.
+export function letterOf(name: string): string {
+  const plain = (name ?? "")
+    .normalize("NFKD") // splits أ into ا + a hamza mark, é into e + an accent
+    .replace(/[\u0300-\u036f\u0610-\u061A\u064B-\u065F\u0670\u0640]/g, "");
+  const first = /[\p{L}\p{N}]/u.exec(plain)?.[0] ?? "";
+  const arabic = LETTER_ALIASES[first] ?? first;
+  if (ARABIC_LETTERS.includes(arabic)) return arabic;
+  const upper = first.toUpperCase();
+  return LATIN_LETTERS.includes(upper) ? upper : OTHER_LETTER;
 }
