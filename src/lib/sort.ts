@@ -39,13 +39,22 @@ export const LATIN_LETTERS = [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"];
 // names that start with a number or a symbol
 export const OTHER_LETTER = "#";
 
+// Look-alike letters some phone keyboards type (Persian/Urdu layouts) and letters outside
+// the 28: each is filed under the Arabic letter a reader would look for.
 const LETTER_ALIASES: Record<string, string> = {
   ء: "ا",
+  ٱ: "ا",
   ى: "ي",
+  ی: "ي",
+  ے: "ي",
   ة: "ه",
+  ہ: "ه",
+  ھ: "ه",
+  ک: "ك",
+  گ: "ك",
   پ: "ب",
   چ: "ج",
-  گ: "ك",
+  ژ: "ز",
   ڤ: "ف",
 };
 
