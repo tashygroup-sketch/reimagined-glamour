@@ -115,6 +115,8 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
           address: form.address,
           notes: form.notes,
           ...(locationUrl ? { locationUrl } : {}),
+          // the saved order's photo page, on whichever address this site is opened from
+          ...(res.id ? { photosUrl: `${window.location.origin}/o/${res.id}` } : {}),
         },
         lines,
         total,
