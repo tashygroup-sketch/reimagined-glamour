@@ -126,6 +126,15 @@ export function OrdersPanel({ phone }: { phone: string }) {
           {o.notes && <p className="mt-3 text-sm text-muted-foreground">ملاحظات: {o.notes}</p>}
 
           <a
+            href={`/o/${o.id}`}
+            target="_blank"
+            rel="noreferrer"
+            className="me-2 mt-4 inline-flex items-center justify-center rounded-full border border-border px-4 py-2 text-sm text-ink transition-colors hover:border-primary hover:text-primary"
+          >
+            صور الطلب
+          </a>
+
+          <a
             href={waLink(
               o.phone,
               `مرحباً ${o.customer_name}، بخصوص طلبك من Glamour with Jannat 💄`,
