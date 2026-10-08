@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { imageSize } from "image-size";
 import type { Database } from "@/integrations/supabase/types";
 import { hasValueStock, parseStock, totalFromValues } from "@/lib/stock";
+import { LIBYAN_MOBILE, normalizeLibyanPhone } from "@/lib/phone";
 
 export const WHATSAPP_NUMBER = "218918640785";
 
@@ -346,18 +347,19 @@ export const createOrder = createServerFn({ method: "POST" })
     }) => input,
   )
   .handler(async ({ data }) => {
+    // Arabic keypad digits, "+218…", spaces: the same number however it was typed.
+    const phone = normalizeLibyanPhone(String(data.phone ?? ""));
     const { isAdminPhone } = await import("@/lib/admin.server");
-    if (isAdminPhone(data.phone)) {
+    if (isAdminPhone(phone)) {
       // Admin trigger code: don't log this as a real customer order, and skip every
       // validation rule below that a real order would need to satisfy.
       return { id: "admin", isAdmin: true as const };
     }
 
     const name = data.customer_name?.trim();
-    const phone = data.phone?.trim();
     const address = data.address?.trim();
     if (!name) throw new Error("الاسم مطلوب");
-    if (!phone || !/^(091|092|093|094)\d{7}$/.test(phone)) {
+    if (!LIBYAN_MOBILE.test(phone)) {
       throw new Error("رقم الهاتف يجب أن يتكون من 10 أرقام ويبدأ بـ 091 أو 092 أو 093 أو 094");
     }
     if (!address) throw new Error("العنوان مطلوب");
