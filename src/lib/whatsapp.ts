@@ -8,6 +8,8 @@ export type BookingInfo = {
   address: string;
   notes: string;
   locationUrl?: string;
+  // page with the photo of every item ordered (src/routes/o.$id.tsx)
+  photosUrl?: string;
 };
 
 export function buildWhatsAppDraft(info: BookingInfo, lines: CartLine[], total: number) {
@@ -23,6 +25,8 @@ export function buildWhatsAppDraft(info: BookingInfo, lines: CartLine[], total: 
 
   const text = [
     "طلب جديد من موقع Glamour with Jannat 💄",
+    // first link in the message, so WhatsApp shows the first product's photo under it
+    info.photosUrl ? `صور المنتجات: ${info.photosUrl}` : null,
     "",
     `الاسم: ${info.name}`,
     `الهاتف: ${info.phone}`,
