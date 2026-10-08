@@ -4,17 +4,20 @@ import { useServerFn } from "@tanstack/react-start";
 import { listOrders } from "@/lib/shop.functions";
 import { MenuPanel } from "@/components/admin/MenuPanel";
 import { StoryPanel } from "@/components/admin/StoryPanel";
+import { OrdersPanel } from "@/components/admin/OrdersPanel";
 import logoAsset from "@/assets/logo.jpg.asset.json";
 
 const STORAGE_KEY = "glamour-admin-phone";
 
-// ?tab=story = the second tab; ?edit=<id|new> = the product form that's open (see MenuPanel).
-// Both in the URL so a refresh keeps them and the back button closes the form first.
-type AdminSearch = { tab?: "story"; edit?: string };
+// ?tab=story / ?tab=orders = the second / third tab; ?edit=<id|new> = the product form that's
+// open (see MenuPanel). Both in the URL so a refresh keeps them and the back button closes
+// the form first.
+type AdminTab = "menu" | "story" | "orders";
+type AdminSearch = { tab?: "story" | "orders"; edit?: string };
 
 export const Route = createFileRoute("/admin")({
   validateSearch: (search: Record<string, unknown>): AdminSearch => ({
-    ...(search["tab"] === "story" ? { tab: "story" as const } : {}),
+    ...(search["tab"] === "story" || search["tab"] === "orders" ? { tab: search["tab"] } : {}),
     ...(typeof search["edit"] === "string" && search["edit"] ? { edit: search["edit"] } : {}),
   }),
   head: () => ({
@@ -34,13 +37,13 @@ function AdminPage() {
   const [phone, setPhone] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
   const search = Route.useSearch();
-  const tab = search.tab === "story" ? "story" : "menu";
+  const tab: AdminTab = search.tab ?? "menu";
   // Switching tabs replaces the entry instead of adding one: back leaves the panel as a whole
   // (or closes an open form), it doesn't flip through tabs.
-  function setTab(next: "menu" | "story") {
+  function setTab(next: AdminTab) {
     void navigate({
       to: "/admin",
-      search: next === "story" ? { tab: "story" } : {},
+      search: next === "menu" ? {} : { tab: next },
       replace: true,
       resetScroll: false,
     });
@@ -117,10 +120,21 @@ function AdminPage() {
           >
             الواجهة والإعلانات
           </button>
+          {/* Every order is saved here when it's sent, including any whose WhatsApp message
+              never went out. */}
+          <button
+            onClick={() => setTab("orders")}
+            className={`rounded-full px-5 py-2 text-sm transition-colors ${
+              tab === "orders" ? "bg-card text-ink shadow" : "text-muted-foreground"
+            }`}
+          >
+            الطلبات
+          </button>
         </div>
 
         {tab === "menu" && <MenuPanel phone={phone} />}
         {tab === "story" && <StoryPanel phone={phone} />}
+        {tab === "orders" && <OrdersPanel phone={phone} />}
       </main>
     </div>
   );
