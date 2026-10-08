@@ -97,7 +97,21 @@ export function OrdersPanel({ phone }: { phone: string }) {
               {o.items.map((it, i) => (
                 <div key={i} className="flex justify-between py-0.5">
                   <span>
-                    {it.name} × {it.qty}
+                    {it.name}
+                    {/* the chosen colour / size, needed to prepare the order */}
+                    {it.options?.length ? (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        ({it.options.map((x) => `${x.name}: ${x.value}`).join("، ")})
+                      </span>
+                    ) : null}{" "}
+                    × {it.qty}
+                    {it.discount_code ? (
+                      <span className="text-xs text-accent-foreground">
+                        {" "}
+                        — كود {it.discount_code}
+                      </span>
+                    ) : null}
                   </span>
                   <span>{(it.price * it.qty).toFixed(2)} د.ل</span>
                 </div>
@@ -112,7 +126,10 @@ export function OrdersPanel({ phone }: { phone: string }) {
           {o.notes && <p className="mt-3 text-sm text-muted-foreground">ملاحظات: {o.notes}</p>}
 
           <a
-            href={waLink(o.phone, `مرحباً ${o.customer_name}، بخصوص طلبك من Glamour with Jannat 💄`)}
+            href={waLink(
+              o.phone,
+              `مرحباً ${o.customer_name}، بخصوص طلبك من Glamour with Jannat 💄`,
+            )}
             target="_blank"
             rel="noreferrer"
             className="mt-4 inline-flex items-center justify-center rounded-full border border-primary px-4 py-2 text-sm text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
