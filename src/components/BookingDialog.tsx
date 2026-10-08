@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
@@ -6,6 +6,7 @@ import { optionsLabel, useCart } from "@/lib/cart";
 import { buildWhatsAppDraft } from "@/lib/whatsapp";
 import { createOrder } from "@/lib/shop.functions";
 import { useLockScroll } from "@/lib/back-layer";
+import { LIBYAN_MOBILE, normalizeLibyanPhone, westernDigits } from "@/lib/phone";
 
 const EMPTY_FORM = { name: "", phone: "", address: "", notes: "" };
 
@@ -18,6 +19,7 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draftUrl, setDraftUrl] = useState<string | null>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
 
   const [locating, setLocating] = useState(false);
   const [locationUrl, setLocationUrl] = useState<string | null>(null);
@@ -36,6 +38,12 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
   }, [open]);
 
   useLockScroll(open);
+
+  // An error appears just above the send button; on a phone the keyboard or the scroll
+  // position can hide it, which looked like "the button does nothing". Bring it into view.
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [error]);
 
   if (!open) return null;
 
@@ -69,12 +77,15 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    // However it was typed (Arabic keypad digits, +218…, spaces, iPhone AutoFill), the number
+    // is checked and sent as 09xxxxxxxx.
+    const phone = normalizeLibyanPhone(form.phone);
     setBusy(true);
     try {
       const res = await submit({
         data: {
           customer_name: form.name,
-          phone: form.phone,
+          phone,
           address: form.address,
           notes: form.notes,
           ...(locationUrl ? { location_url: locationUrl } : {}),
@@ -91,7 +102,7 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
       });
 
       if (res.isAdmin) {
-        localStorage.setItem("glamour-admin-phone", form.phone);
+        localStorage.setItem("glamour-admin-phone", phone);
         // replace: back from the control panel returns to the shop, not to this form
         navigate({ to: "/admin", replace: true });
         return;
@@ -100,7 +111,7 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
       const url = buildWhatsAppDraft(
         {
           name: form.name,
-          phone: form.phone,
+          phone,
           address: form.address,
           notes: form.notes,
           ...(locationUrl ? { locationUrl } : {}),
@@ -109,16 +120,43 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
         total,
       );
       setDraftUrl(url);
-      window.open(url, "_blank");
       clear();
       // stock just went down on the server; refresh so sold-out items grey out right away
       queryClient.invalidateQueries({ queryKey: ["menu"] });
+      openWhatsApp(url);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "تعذّر إرسال الحجز");
+      // TypeError = the request never reached the server (no signal, "Load failed")
+      setError(
+        err instanceof TypeError
+          ? "تعذّر الاتصال، تأكدي من الإنترنت وحاولي مرة أخرى"
+          : err instanceof Error
+            ? err.message
+            : "تعذّر إرسال الطلب، حاولي مرة أخرى",
+      );
     } finally {
       setBusy(false);
     }
   }
+
+  // The order only reaches the shop once the WhatsApp message is sent, so WhatsApp has to
+  // open. A new tab is tried first, but iPhone Safari (and others, after a slow answer from
+  // the server) silently blocks a tab that isn't opened directly by a tap — that's what made
+  // the button "sometimes not work". When the tab is blocked, this page itself goes to
+  // WhatsApp instead, which is never blocked. The confirmation screen also has a WhatsApp
+  // button, for the rare browser that opens nothing at all.
+  function openWhatsApp(url: string) {
+    let tab: Window | null = null;
+    try {
+      tab = window.open(url, "_blank");
+    } catch {
+      tab = null;
+    }
+    if (!tab) window.location.assign(url);
+  }
+
+  // Shown under the field while typing, so a wrong number is noticed before sending.
+  const phoneDigits = normalizeLibyanPhone(form.phone);
+  const phoneLooksWrong = phoneDigits.length >= 10 && !LIBYAN_MOBILE.test(phoneDigits);
 
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center overflow-hidden bg-ink/40 backdrop-blur-sm sm:items-center">
@@ -137,28 +175,48 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
 
         {draftUrl ? (
           <div className="mt-6 text-center">
-            <p className="text-lg text-ink">تم إرسال طلبك 💄</p>
+            <p className="text-lg text-ink">تم تسجيل طلبك 💄</p>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+              يصل الطلب للمتجر عند إرسال رسالة الواتساب. إذا لم يُفتح واتساب، اضغطي الزر:
+            </p>
+            {/* a real link: a direct tap on it opens WhatsApp in every browser */}
+            <a
+              href={draftUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-[#25D366] px-6 py-3 font-bold text-white"
+            >
+              إرسال الطلب على واتساب
+            </a>
             <button
               onClick={onClose}
-              className="mt-5 w-full rounded-full px-6 py-3 font-medium text-primary-foreground"
-              style={{ backgroundImage: "var(--gradient-pink)" }}
+              className="mt-3 w-full rounded-full border border-border px-6 py-3 text-sm text-ink"
             >
               إغلاق
             </button>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="mt-6 space-y-3">
-            <Input label="الاسم الكامل" {...field("name")} />
+            <Input label="الاسم الكامل" required autoComplete="name" {...field("name")} />
+            {/* No length limit: iPhone AutoFill puts "+218…" (13 characters) here, which a
+                10-character limit used to cut into an invalid number. */}
             <Input
               label="رقم الهاتف"
               required
+              type="tel"
               inputMode="tel"
+              autoComplete="tel"
               dir="ltr"
               placeholder="0912345678"
-              maxLength={10}
-              {...field("phone")}
+              value={form.phone}
+              onChange={(e) => setForm((f) => ({ ...f, phone: westernDigits(e.target.value) }))}
             />
-            <Input label="العنوان" {...field("address")} />
+            {phoneLooksWrong && (
+              <p className="-mt-1 text-xs text-destructive">
+                الرقم يجب أن يكون 10 أرقام ويبدأ بـ 091 أو 092 أو 093 أو 094
+              </p>
+            )}
+            <Input label="العنوان" required autoComplete="street-address" {...field("address")} />
 
             <div>
               <button
@@ -215,7 +273,11 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
               </div>
             )}
 
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && (
+              <p ref={errorRef} role="alert" className="text-sm font-medium text-destructive">
+                {error}
+              </p>
+            )}
 
             <button
               type="submit"
