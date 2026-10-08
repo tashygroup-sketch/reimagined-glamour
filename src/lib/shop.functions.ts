@@ -135,6 +135,28 @@ function parseSalePrice(raw: unknown, regular: number): number | null {
   return Math.round(n * 100) / 100;
 }
 
+// The photo that shows exactly what was ordered: the chosen value's own photo (e.g. the red
+// shade) when it has one, otherwise the product's card photo.
+function photoForChoice(
+  product: {
+    image_url?: string | null;
+    extra_images?: string[] | null;
+    variables: ProductVariant[];
+  },
+  options: OrderOption[] | undefined,
+): string | null {
+  for (const v of product.variables) {
+    const pick = options?.find((o) => o.name === v.name);
+    const value = pick ? v.values.find((x) => x.label === pick.value) : undefined;
+    if (value?.image_url) return value.image_url;
+  }
+  return coverImage({
+    image_url: product.image_url ?? null,
+    extra_images: product.extra_images ?? [],
+    variables: product.variables,
+  });
+}
+
 export type AdminDiscount = {
   product_id: string;
   code: string;
@@ -195,11 +217,14 @@ export type OrderRow = {
   notes: string | null;
   location_url: string | null;
   items: {
+    id?: string;
     name: string;
     qty: number;
     price: number;
     options?: OrderOption[];
     discount_code?: string;
+    // the photo of this line as ordered (the chosen colour's photo, else the product photo)
+    image_url?: string;
   }[];
   total: number;
   status: string;
@@ -381,6 +406,7 @@ export const createOrder = createServerFn({ method: "POST" })
       price: number;
       options?: OrderOption[];
       discount_code?: string;
+      image_url?: string;
     };
     const cleanItems: CleanItem[] = data.items.map((i) => ({
       ...(i.id ? { id: i.id } : {}),
@@ -398,9 +424,12 @@ export const createOrder = createServerFn({ method: "POST" })
         variables?: unknown;
         min_qty?: number;
         sale_price?: number | null;
+        image_url?: string | null;
+        extra_images?: string[] | null;
       };
       let rows: ProductRow[] = [];
       for (const cols of [
+        "id,name,price,sale_price,variables,min_qty,image_url,extra_images",
         "id,name,price,sale_price,variables,min_qty",
         "id,name,price,variables,min_qty",
         "id,name,price,variables",
@@ -454,6 +483,11 @@ export const createOrder = createServerFn({ method: "POST" })
           }
           clean.options = chosen;
         }
+
+        // saved with the order, so the owner sees exactly what was ordered even if the
+        // product's photos change later (shown on the order's photo page, /o/<id>)
+        const photo = photoForChoice({ ...row, variables }, clean.options);
+        if (photo) clean.image_url = photo;
 
         // price: the discount price only with a valid, unexpired code; otherwise the regular one
         let price = effectivePrice({
@@ -540,6 +574,95 @@ export const createOrder = createServerFn({ method: "POST" })
     }
     if (result.error) throw new Error(result.error.message);
     return { id: result.data.id as string, isAdmin: false as const };
+  });
+
+// ---------- the photos of one order (the page linked from the WhatsApp message) ----------
+
+export type OrderPhotos = {
+  items: {
+    name: string;
+    qty: number;
+    price: number;
+    options: OrderOption[];
+    image_url: string | null;
+  }[];
+  total: number;
+  created_at: string;
+  // a small photo for WhatsApp's link preview
+  preview_image: string | null;
+};
+
+const ORDER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Only what was ordered — no name, phone or address — so the link is safe to forward. Order
+// ids are long random codes, so pages can't be found by guessing.
+export const getOrderPhotos = createServerFn({ method: "GET" })
+  .inputValidator((input: { id: string }) => {
+    if (!ORDER_ID.test(String(input?.id ?? ""))) throw new Error("رابط غير صحيح");
+    return input;
+  })
+  .handler(async ({ data }): Promise<OrderPhotos | null> => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: row, error } = await supabaseAdmin
+      .from("orders")
+      .select("items,total,created_at")
+      .eq("id", data.id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!row) return null;
+    const items = (Array.isArray(row.items) ? row.items : []) as unknown as OrderRow["items"];
+
+    // Orders placed before photos were saved with them: look the photos up from the products.
+    const missing = [...new Set(items.filter((i) => !i.image_url && i.id).map((i) => i.id!))];
+    const products = new Map<
+      string,
+      { image_url: string | null; extra_images: string[] | null; variables: ProductVariant[] }
+    >();
+    if (missing.length > 0) {
+      const res = await supabaseAdmin
+        .from("menu_items")
+        .select("id,image_url,extra_images,variables")
+        .in("id", missing);
+      for (const p of (res.data ?? []) as unknown as {
+        id: string;
+        image_url: string | null;
+        extra_images: string[] | null;
+        variables: unknown;
+      }[]) {
+        products.set(p.id, { ...p, variables: normalizeVariables(p.variables) });
+      }
+    }
+
+    const out = items.map((i) => {
+      const product = i.id ? products.get(i.id) : undefined;
+      return {
+        name: String(i.name ?? ""),
+        qty: Number(i.qty) || 0,
+        price: Number(i.price) || 0,
+        options: Array.isArray(i.options) ? i.options : [],
+        image_url: i.image_url ?? (product ? photoForChoice(product, i.options) : null),
+      };
+    });
+
+    // WhatsApp only shows a preview for a small enough photo: use the light copy when it exists.
+    const first = out.find((i) => i.image_url)?.image_url ?? null;
+    let preview = first;
+    const name = first ? ownPhotoName(first) : null;
+    if (name) {
+      const light = `${photoPrefix()}thumbs/${name}`;
+      try {
+        const res = await fetch(light, { method: "HEAD" });
+        if (res.ok) preview = light;
+      } catch {
+        // keep the full photo
+      }
+    }
+    return {
+      items: out,
+      total: Number(row.total) || 0,
+      created_at: row.created_at,
+      preview_image: preview,
+    };
   });
 
 export const listOrders = createServerFn({ method: "POST" })
