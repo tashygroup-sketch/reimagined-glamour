@@ -4,9 +4,9 @@ import { ARABIC_LETTERS, LATIN_LETTERS, OTHER_LETTER } from "@/lib/sort";
 
 // "أ – ي" button above a product list. Pressing it opens the alphabet; pressing a letter
 // closes it and tells the list to scroll to the first product that starts with that letter.
-// The Arabic alphabet is always listed; letters no product starts with are greyed out. The
-// English alphabet (and "0–9" for names that start with a number) is added when some product
-// needs it.
+// Both alphabets are always listed, Arabic first and English under it; letters no product
+// starts with are greyed out. "0–9" (names that start with a number) is added when some
+// product needs it.
 export function LetterPicker({
   letters,
   onPick,
@@ -20,7 +20,6 @@ export function LetterPicker({
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const has = new Set(letters);
-  const showLatin = LATIN_LETTERS.some((l) => has.has(l));
 
   useEffect(() => {
     if (!open) return;
@@ -86,11 +85,9 @@ export function LetterPicker({
         >
           <p className="mb-2 text-xs text-muted-foreground">اختاري حرفًا للانتقال إليه</p>
           <div className="grid grid-cols-7 gap-1">{ARABIC_LETTERS.map((l) => letterButton(l))}</div>
-          {showLatin && (
-            <div dir="ltr" className="mt-3 grid grid-cols-7 gap-1">
-              {LATIN_LETTERS.map((l) => letterButton(l))}
-            </div>
-          )}
+          <div dir="ltr" className="mt-3 grid grid-cols-7 gap-1">
+            {LATIN_LETTERS.map((l) => letterButton(l))}
+          </div>
           {has.has(OTHER_LETTER) && (
             <div className="mt-3 grid grid-cols-7 gap-1">
               <div className="col-span-2">{letterButton(OTHER_LETTER, "0–9")}</div>
