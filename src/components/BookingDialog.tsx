@@ -1,25 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { useQueryClient } from "@tanstack/react-query";
 import { optionsLabel, useCart } from "@/lib/cart";
 import { buildWhatsAppDraft } from "@/lib/whatsapp";
-import { createOrder } from "@/lib/shop.functions";
+import { checkAdminCode, createOrder } from "@/lib/shop.functions";
 import { useLockScroll } from "@/lib/back-layer";
-import { LIBYAN_MOBILE, normalizeLibyanPhone, westernDigits } from "@/lib/phone";
+import { LIBYAN_MOBILE, normalizeLibyanPhone, PHONE_LENGTH, phoneInput } from "@/lib/phone";
+
+const ADMIN_KEY = "glamour-admin-phone";
 
 const EMPTY_FORM = { name: "", phone: "", address: "", notes: "" };
 
 export function BookingDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { lines, total, clear } = useCart();
   const submit = useServerFn(createOrder);
+  const isAdminCode = useServerFn(checkAdminCode);
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [form, setForm] = useState(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draftUrl, setDraftUrl] = useState<string | null>(null);
   const errorRef = useRef<HTMLParagraphElement>(null);
+  // the last full number the server said is not the control panel's code
+  const [checkedPhone, setCheckedPhone] = useState<string | null>(null);
 
   const [locating, setLocating] = useState(false);
   const [locationUrl, setLocationUrl] = useState<string | null>(null);
@@ -35,7 +38,34 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
     setLocationUrl(null);
     setLocationError(null);
     setLocating(false);
+    setCheckedPhone(null);
   }, [open]);
+
+  // The control panel's code opens the panel as soon as its 10th digit is typed — no name,
+  // address or send button needed. The server answers yes/no, so the code isn't in the site.
+  const typedPhone = normalizeLibyanPhone(form.phone);
+  useEffect(() => {
+    if (!open || typedPhone.length !== PHONE_LENGTH) return;
+    let stale = false;
+    isAdminCode({ data: { phone: typedPhone } })
+      .then((res) => {
+        if (stale) return;
+        if (res.admin) {
+          localStorage.setItem(ADMIN_KEY, typedPhone);
+          // replace: back from the control panel returns to the shop, not to this form
+          navigate({ to: "/admin", replace: true });
+        } else {
+          setCheckedPhone(typedPhone);
+        }
+      })
+      .catch(() => {
+        if (!stale) setCheckedPhone(typedPhone);
+      });
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, typedPhone]);
 
   useLockScroll(open);
 
@@ -101,9 +131,9 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
         },
       });
 
+      // (normally the panel has already opened while typing; this is for a lost connection)
       if (res.isAdmin) {
-        localStorage.setItem("glamour-admin-phone", phone);
-        // replace: back from the control panel returns to the shop, not to this form
+        localStorage.setItem(ADMIN_KEY, phone);
         navigate({ to: "/admin", replace: true });
         return;
       }
@@ -123,8 +153,6 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
       );
       setDraftUrl(url);
       clear();
-      // stock just went down on the server; refresh so sold-out items grey out right away
-      queryClient.invalidateQueries({ queryKey: ["menu"] });
       openWhatsApp(url);
     } catch (err) {
       // TypeError = the request never reached the server (no signal, "Load failed")
@@ -156,9 +184,12 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
     if (!tab) window.location.assign(url);
   }
 
-  // Shown under the field while typing, so a wrong number is noticed before sending.
-  const phoneDigits = normalizeLibyanPhone(form.phone);
-  const phoneLooksWrong = phoneDigits.length >= 10 && !LIBYAN_MOBILE.test(phoneDigits);
+  // Shown under the field while typing, so a wrong number is noticed before sending (not
+  // while the server is still checking it, so the control panel's code never shows it).
+  const phoneLooksWrong =
+    typedPhone.length >= PHONE_LENGTH &&
+    checkedPhone === typedPhone &&
+    !LIBYAN_MOBILE.test(typedPhone);
 
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center overflow-hidden bg-ink/40 backdrop-blur-sm sm:items-center">
@@ -200,18 +231,20 @@ export function BookingDialog({ open, onClose }: { open: boolean; onClose: () =>
         ) : (
           <form onSubmit={handleSubmit} className="mt-6 space-y-3">
             <Input label="الاسم الكامل" required autoComplete="name" {...field("name")} />
-            {/* No length limit: iPhone AutoFill puts "+218…" (13 characters) here, which a
-                10-character limit used to cut into an invalid number. */}
+            {/* Digits only, at most 10 (phoneInput). No maxLength here: iPhone AutoFill puts
+                "+218…" (13 characters) in the field, which the browser would cut into a wrong
+                number before phoneInput turns it into 09…. */}
             <Input
               label="رقم الهاتف"
               required
               type="tel"
-              inputMode="tel"
+              inputMode="numeric"
+              pattern="[0-9]*"
               autoComplete="tel"
               dir="ltr"
               placeholder="0912345678"
               value={form.phone}
-              onChange={(e) => setForm((f) => ({ ...f, phone: westernDigits(e.target.value) }))}
+              onChange={(e) => setForm((f) => ({ ...f, phone: phoneInput(e.target.value) }))}
             />
             {phoneLooksWrong && (
               <p className="-mt-1 text-xs text-destructive">
