@@ -24,3 +24,19 @@ export function normalizeLibyanPhone(raw: string): string {
 }
 
 export const LIBYAN_MOBILE = /^(091|092|093|094)\d{7}$/;
+
+// What the phone field keeps while typing: digits only, at most 10. A pasted or AutoFilled
+// "+218 91 234 5678" / "00218…" is turned into 0912345678 first, so it isn't cut into a
+// wrong number. (No maxLength on the field for the same reason: the browser would cut
+// "+218…" before this ever sees it.)
+export const PHONE_LENGTH = 10;
+
+export function phoneInput(raw: string): string {
+  let digits = westernDigits(raw).replace(/\D/g, "");
+  let local: string | null = null;
+  if (digits.startsWith("00218") && digits.length >= 14) local = digits.slice(5);
+  else if (digits.startsWith("218") && digits.length >= 12) local = digits.slice(3);
+  // "+218 091…" (an extra 0 after the country code) stays a single 0
+  if (local !== null) digits = local.startsWith("0") ? local : `0${local}`;
+  return digits.slice(0, PHONE_LENGTH);
+}

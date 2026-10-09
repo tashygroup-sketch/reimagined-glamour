@@ -1,8 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { createClient } from "@supabase/supabase-js";
 import { imageSize } from "image-size";
-import type { Database } from "@/integrations/supabase/types";
-import { hasValueStock, parseStock, totalFromValues } from "@/lib/stock";
+import type { Database, Json } from "@/integrations/supabase/types";
+import { hasValueStock, overStockValue, parseStock, totalFromValues } from "@/lib/stock";
 import { LIBYAN_MOBILE, normalizeLibyanPhone } from "@/lib/phone";
 
 export const WHATSAPP_NUMBER = "218918640785";
@@ -225,11 +225,25 @@ export type OrderRow = {
     discount_code?: string;
     // the photo of this line as ordered (the chosen colour's photo, else the product photo)
     image_url?: string;
+    // Stock is only taken when the order is marked delivered in the control panel:
+    //   "pending" = not taken yet · "taken" = taken at delivery · "none" = nothing to take
+    //   (product deleted or not counted). Missing = an older order, whose stock was already
+    //   taken when it was placed.
+    stock?: OrderStock;
   }[];
   total: number;
   status: string;
   created_at: string;
 };
+
+export type OrderStock = "pending" | "taken" | "none";
+type OrderItem = OrderRow["items"][number];
+
+// The order statuses. "تم التسليم" is only set by the control panel's delivered button,
+// because that is what takes the quantities from the stock.
+export const ORDER_STATUSES = ["جديد", "قيد التحضير", "جاهز للاستلام", "ملغي"] as const;
+export const DELIVERED = "تم التسليم";
+const NEW_ORDER = "جديد";
 
 function publicClient() {
   const key = process.env["SUPABASE_PUBLISHABLE_KEY"]!;
@@ -395,7 +409,7 @@ export const createOrder = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
     // Everything the customer's browser sent is re-checked against the database here, before
-    // stock is touched: chosen options, minimum quantity, discount codes, and the price of
+    // the order is saved: chosen options, minimum quantity, discount codes, and the price of
     // every line. The WhatsApp message is written from the same cart, so a refused order
     // means a wrong price can never reach the owner.
     const productIds = [...new Set(data.items.map((i) => i.id).filter((id): id is string => !!id))];
@@ -407,6 +421,7 @@ export const createOrder = createServerFn({ method: "POST" })
       options?: OrderOption[];
       discount_code?: string;
       image_url?: string;
+      stock?: OrderStock;
     };
     const cleanItems: CleanItem[] = data.items.map((i) => ({
       ...(i.id ? { id: i.id } : {}),
@@ -426,9 +441,11 @@ export const createOrder = createServerFn({ method: "POST" })
         sale_price?: number | null;
         image_url?: string | null;
         extra_images?: string[] | null;
+        stock?: number | null;
       };
       let rows: ProductRow[] = [];
       for (const cols of [
+        "id,name,price,sale_price,variables,min_qty,image_url,extra_images,stock",
         "id,name,price,sale_price,variables,min_qty,image_url,extra_images",
         "id,name,price,sale_price,variables,min_qty",
         "id,name,price,variables,min_qty",
@@ -457,6 +474,11 @@ export const createOrder = createServerFn({ method: "POST" })
           .in("product_id", codedIds);
         for (const d of drows ?? [])
           discounts.set(d.product_id, { ...d, discount_price: Number(d.discount_price) });
+      }
+
+      // a product deleted (or hidden from the database) after it went into the cart
+      if (productIds.some((id) => !byId.has(id))) {
+        throw new Error("أحد الأصناف في السلة لم يعد متوفرًا، يرجى تعديل السلة");
       }
 
       const qtyByProduct = new Map<string, number>();
@@ -523,36 +545,28 @@ export const createOrder = createServerFn({ method: "POST" })
           throw new Error(`أقل كمية يمكن طلبها من "${row.name}" هي ${min}`);
         }
       }
-    }
 
-    // Deduct stock first, atomically: if any item doesn't have enough, nothing is deducted
-    // and the order is refused before WhatsApp ever opens. The checked options go along so
-    // each chosen value's own quantity goes down too.
-    const stockItems = cleanItems
-      .filter((i) => typeof i.id === "string" && i.id.length > 0)
-      .map((i) => ({ id: i.id!, qty: i.qty, options: i.options ?? [] }));
-    if (stockItems.length > 0) {
-      let { error: stockError } = await supabaseAdmin.rpc(RESERVE_V2, { p_items: stockItems });
-      if (stockError?.code === "PGRST202") {
-        // Newer function not installed yet: the older one still handles product totals.
-        ({ error: stockError } = await supabaseAdmin.rpc("reserve_stock", {
-          p_items: stockItems,
-        }));
-      }
-      if (stockError) {
-        const outOfStock = /OUT_OF_STOCK:(.+)$/.exec(stockError.message);
-        if (outOfStock) {
+      // Is there enough of everything? Only checked here — nothing is taken from the stock
+      // when a customer orders. The quantities go down when the order is marked delivered in
+      // the control panel (setOrderDelivered below).
+      const lines = cleanItems
+        .filter((i) => i.id)
+        .map((i) => ({ id: i.id!, qty: i.qty, options: i.options ?? [] }));
+      for (const line of lines) {
+        const row = byId.get(line.id)!;
+        const stock = typeof row.stock === "number" ? row.stock : null;
+        const variables = normalizeVariables(row.variables);
+        const short = overStockValue({ id: row.id, stock, variables }, lines, line.options);
+        if (short) {
           throw new Error(
-            `الكمية المتوفرة من "${outOfStock[1]!.trim()}" لا تكفي، يرجى تعديل السلة`,
+            `الكمية المتوفرة من "${row.name} (${short.value})" لا تكفي، يرجى تعديل السلة`,
           );
         }
-        if (stockError.message.includes("ITEM_NOT_FOUND")) {
-          throw new Error("أحد الأصناف في السلة لم يعد متوفرًا، يرجى تعديل السلة");
+        if (stock !== null && (qtyByProduct.get(row.id) ?? 0) > stock) {
+          throw new Error(`الكمية المتوفرة من "${row.name}" لا تكفي، يرجى تعديل السلة`);
         }
-        // PGRST202 = function not found: the stock migration hasn't been run yet.
-        // Don't block real orders over it — just skip stock tracking until it exists.
-        if (stockError.code !== "PGRST202") throw new Error(stockError.message);
       }
+      for (const clean of cleanItems) if (clean.id) clean.stock = "pending";
     }
 
     const payload: Database["public"]["Tables"]["orders"]["Insert"] = {
@@ -665,6 +679,9 @@ export const getOrderPhotos = createServerFn({ method: "GET" })
     };
   });
 
+// Only real orders: the ones customers sent from the order form. The control panel's code
+// never creates an order (createOrder stops before saving it), and any left from before are
+// hidden here too.
 export const listOrders = createServerFn({ method: "POST" })
   .inputValidator((input: { phone: string }) => input)
   .handler(async ({ data }) => {
@@ -675,16 +692,201 @@ export const listOrders = createServerFn({ method: "POST" })
       .order("created_at", { ascending: false })
       .limit(200);
     if (error) throw new Error(error.message);
-    return (rows ?? []) as OrderRow[];
+    const { isAdminPhone } = await import("@/lib/admin.server");
+    return ((rows ?? []) as OrderRow[]).filter((o) => !isAdminPhone(o.phone));
   });
 
 export const updateOrderStatus = createServerFn({ method: "POST" })
-  .inputValidator((input: { phone: string; id: string; status: string }) => input)
+  .inputValidator((input: { phone: string; id: string; status: string }) => {
+    if (!(ORDER_STATUSES as readonly string[]).includes(input.status)) {
+      throw new Error("حالة غير صحيحة");
+    }
+    return input;
+  })
   .handler(async ({ data }) => {
     const db = await adminClient(data.phone);
-    const { error } = await db.from("orders").update({ status: data.status }).eq("id", data.id);
+    // A delivered order changes only through its own button, which gives the stock back.
+    const { data: rows, error } = await db
+      .from("orders")
+      .update({ status: data.status })
+      .eq("id", data.id)
+      .neq("status", DELIVERED)
+      .select("id");
     if (error) throw new Error(error.message);
+    if (!rows?.length) throw new Error("هذا الطلب مُسلَّم، اضغطي «تراجع عن التسليم» أولاً");
     return { ok: true };
+  });
+
+// ---------- delivered / not delivered: the only place stock goes down ----------
+
+type ProductStockRow = { id: string; name: string; stock: number | null; variables: unknown };
+
+// Counted = the product has a total quantity, or a quantity on any of its values.
+function isCounted(row: ProductStockRow) {
+  return typeof row.stock === "number" || hasValueStock(normalizeVariables(row.variables));
+}
+
+async function readStockRows(
+  db: Awaited<ReturnType<typeof adminClient>>,
+  ids: string[],
+): Promise<Map<string, ProductStockRow>> {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await db
+    .from("menu_items")
+    .select("id,name,stock,variables")
+    .in("id", ids);
+  if (error) throw new Error(error.message);
+  const rows = (data ?? []) as unknown as ProductStockRow[];
+  return new Map(rows.map((r) => [r.id, r]));
+}
+
+// Gives back what delivering took: each chosen value's quantity, then the product's total
+// (recalculated from the values the same way reserve_stock_v2 does, or plus the pieces).
+// Returns the names of products whose quantity couldn't be written back.
+async function giveBackStock(
+  db: Awaited<ReturnType<typeof adminClient>>,
+  items: OrderItem[],
+): Promise<string[]> {
+  const taken = items.filter((i) => i.stock === "taken" && i.id);
+  const rows = await readStockRows(db, [...new Set(taken.map((i) => i.id!))]);
+  const failed: string[] = [];
+  for (const row of rows.values()) {
+    const lines = taken.filter((i) => i.id === row.id);
+    const pieces = lines.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+    const raw = Array.isArray(row.variables)
+      ? (JSON.parse(JSON.stringify(row.variables)) as {
+          name?: unknown;
+          values?: { label?: unknown; stock?: unknown }[];
+        }[])
+      : [];
+    let update: { stock: number | null; variables?: typeof raw };
+    if (hasValueStock(normalizeVariables(raw))) {
+      for (const line of lines) {
+        for (const o of line.options ?? []) {
+          const value = raw
+            .find((v) => v?.name === o.name)
+            ?.values?.find((x) => x?.label === o.value);
+          if (value && typeof value.stock === "number") {
+            value.stock = Math.min(99999, value.stock + (Number(line.qty) || 0));
+          }
+        }
+      }
+      update = { stock: totalFromValues(normalizeVariables(raw)), variables: raw };
+    } else if (typeof row.stock === "number") {
+      update = { stock: Math.min(99999, row.stock + pieces) };
+    } else {
+      continue; // not counted: nothing was taken
+    }
+    const { error } = await db
+      .from("menu_items")
+      .update(update as Database["public"]["Tables"]["menu_items"]["Update"])
+      .eq("id", row.id);
+    if (error) failed.push(row.name);
+  }
+  return failed;
+}
+
+// The control panel's "تم التسليم" button (delivered = true) and its undo (delivered = false).
+// Delivering takes every piece of the order from the stock — the product's quantity, or the
+// chosen colour/size's quantity — all at once: if anything is short, nothing is taken and the
+// order stays as it was. Undoing gives the same pieces back.
+export const setOrderDelivered = createServerFn({ method: "POST" })
+  .inputValidator((input: { phone: string; id: string; delivered: boolean }) => {
+    if (!ORDER_ID.test(String(input?.id ?? ""))) throw new Error("طلب غير صحيح");
+    return { phone: String(input.phone ?? ""), id: input.id, delivered: input.delivered === true };
+  })
+  .handler(async ({ data }): Promise<{ status: string; items: OrderItem[] }> => {
+    const db = await adminClient(data.phone);
+    const { data: order, error } = await db
+      .from("orders")
+      .select("status,items")
+      .eq("id", data.id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!order) throw new Error("لم يعد هذا الطلب موجودًا");
+    const before = order.status;
+    const items = (Array.isArray(order.items) ? order.items : []) as unknown as OrderItem[];
+    if ((before === DELIVERED) === data.delivered) return { status: before, items };
+
+    // Status and items change together, and only if the order is still as it was read: a
+    // double tap or a second phone can never take (or give back) the same pieces twice.
+    const claim = async (status: string, next: OrderItem[], from: string) => {
+      const { data: rows, error: claimError } = await db
+        .from("orders")
+        .update({ status, items: next as unknown as Json })
+        .eq("id", data.id)
+        .eq("status", from)
+        .select("id");
+      if (claimError) throw new Error(claimError.message);
+      return (rows?.length ?? 0) > 0;
+    };
+    const changedElsewhere = "تغيّر هذا الطلب من جهاز آخر، حدّثي الصفحة وحاولي مرة أخرى";
+
+    if (!data.delivered) {
+      const next = items.map((i) =>
+        i.stock === "taken" || i.stock === "none" ? { ...i, stock: "pending" as const } : i,
+      );
+      if (!(await claim(NEW_ORDER, next, DELIVERED))) throw new Error(changedElsewhere);
+      const failed = await giveBackStock(db, items);
+      if (failed.length > 0) {
+        throw new Error(
+          `أُلغي التسليم، لكن تعذّر إرجاع كمية: ${failed.join("، ")} — عدّليها من صفحة المنتج`,
+        );
+      }
+      return { status: NEW_ORDER, items: next };
+    }
+
+    // Older orders (no "pending" lines) already had their stock taken when they were placed.
+    const pending = items.filter((i) => i.stock === "pending" && i.id);
+    const rows = await readStockRows(db, [...new Set(pending.map((i) => i.id!))]);
+    const next = items.map((i) => {
+      if (i.stock !== "pending" || !i.id) return i;
+      const row = rows.get(i.id);
+      return { ...i, stock: row && isCounted(row) ? ("taken" as const) : ("none" as const) };
+    });
+    if (!(await claim(DELIVERED, next, before))) throw new Error(changedElsewhere);
+
+    const take = next
+      .filter((i) => i.stock === "taken")
+      .map((i) => ({ id: i.id!, qty: Number(i.qty) || 0, options: i.options ?? [] }));
+    if (take.length === 0) return { status: DELIVERED, items: next };
+
+    let { error: stockError } = await db.rpc(RESERVE_V2, { p_items: take });
+    if (stockError?.code === "PGRST202") {
+      ({ error: stockError } = await db.rpc("reserve_stock", { p_items: take }));
+    }
+    if (!stockError) return { status: DELIVERED, items: next };
+
+    if (stockError.code === "PGRST202") {
+      // The stock functions were never installed, so stock isn't counted on this database:
+      // the order is delivered, and nothing was taken.
+      await claim(DELIVERED, items, DELIVERED);
+      return { status: DELIVERED, items };
+    }
+    // Nothing was taken (the function takes all or nothing): put the order back as it was.
+    await claim(before, items, DELIVERED);
+    const short = /OUT_OF_STOCK:(.+)$/.exec(stockError.message);
+    if (short) {
+      throw new Error(
+        `الكمية المسجلة من "${short[1]!.trim()}" أقل من هذا الطلب. صحّحي الكمية من صفحة المنتج، ثم اضغطي «تأكيد التسليم» مرة أخرى`,
+      );
+    }
+    if (stockError.message.includes("ITEM_NOT_FOUND")) {
+      throw new Error("حُذف أحد منتجات هذا الطلب للتو، اضغطي «تأكيد التسليم» مرة أخرى");
+    }
+    throw new Error(stockError.message);
+  });
+
+// The order form asks this as soon as 10 digits are in the phone field, so the control
+// panel's code opens the panel right away — no name, address or send button needed. Only
+// yes/no comes back; the code itself never reaches the browser.
+export const checkAdminCode = createServerFn({ method: "POST" })
+  .inputValidator((input: { phone: string }) => ({
+    phone: String(input?.phone ?? "").slice(0, 40),
+  }))
+  .handler(async ({ data }) => {
+    const { isAdminPhone } = await import("@/lib/admin.server");
+    return { admin: isAdminPhone(normalizeLibyanPhone(data.phone)) };
   });
 
 export const saveMenuItem = createServerFn({ method: "POST" })
