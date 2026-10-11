@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -10,9 +10,15 @@ import {
   saveHeroImage,
   saveHeroText,
 } from "@/lib/shop.functions";
-import { fileToCompressedBase64 } from "@/lib/image";
+import {
+  fileToCompressedBase64,
+  limitConcurrency,
+  MAX_PHOTOS_PER_PICK,
+  withUploadRetry,
+} from "@/lib/image";
+import { arCount } from "@/lib/utils";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { CropDialog, type CroppedImage } from "./CropDialog";
+import { CropQueue, type CropBatch, type CroppedImage } from "./CropDialog";
 
 type StoryData = Awaited<ReturnType<typeof getStorySection>>;
 
@@ -31,9 +37,15 @@ export function StoryPanel({ phone }: { phone: string }) {
   const [form, setForm] = useState({ story_label: "", story_title: "", story_text: "" });
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  // ad photos still uploading (several can be picked at once)
+  const [adsPending, setAdsPending] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [cropFile, setCropFile] = useState<File | null>(null);
+  const [pickNote, setPickNote] = useState<string | null>(null);
+  const [cropBatch, setCropBatch] = useState<CropBatch<null> | null>(null);
+  // 3 uploads at a time; each ad is added after the previous one, so they keep the picked order
+  const uploadSlot = useRef(limitConcurrency(3));
+  const adOrder = useRef<Promise<void>>(Promise.resolve());
+  const adsLeft = useRef(0);
   const [heroBusy, setHeroBusy] = useState(false);
   const [heroError, setHeroError] = useState<string | null>(null);
   const [removeHeroOpen, setRemoveHeroOpen] = useState(false);
@@ -43,7 +55,7 @@ export function StoryPanel({ phone }: { phone: string }) {
 
   async function load() {
     try {
-      const res = await fetchStory();
+      const res = await fetchStory({ data: { fresh: true } });
       setData(res);
       setForm({
         story_label: res.story_label,
@@ -80,33 +92,63 @@ export function StoryPanel({ phone }: { phone: string }) {
     }
   }
 
-  function pickAdPhoto(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+  // Up to MAX_PHOTOS_PER_PICK ads in one pick; picking again adds more (no limit overall).
+  function pickAdPhotos(e: React.ChangeEvent<HTMLInputElement>) {
+    const picked = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (file) setCropFile(file);
+    if (picked.length === 0) return;
+    const files = picked.slice(0, MAX_PHOTOS_PER_PICK);
+    setUploadError(null);
+    setPickNote(
+      picked.length > files.length
+        ? `اخترتِ ${picked.length} صورة — تُضاف أول ${MAX_PHOTOS_PER_PICK} الآن، واختاري الباقي بعدها`
+        : null,
+    );
+    setCropBatch({ files, tag: null });
   }
 
-  // Ad photo arrives already cropped to 960×1280 by the crop screen.
-  async function handleCroppedAd(image: CroppedImage) {
-    setCropFile(null);
-    setUploading(true);
-    setUploadError(null);
-    try {
-      const res = await upload({
-        data: {
-          phone,
-          filename: image.filename,
-          contentType: image.contentType,
-          dataBase64: image.base64,
-        },
-      });
-      await addImage({ data: { phone, image_url: res.url, ratio: res.ratio } });
-      await load();
-      refreshPublicStory();
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "تعذّر رفع الصورة");
-    } finally {
-      setUploading(false);
+  // Each ad photo arrives already cropped to 960×1280 by the crop screen and starts uploading
+  // right away, in the background.
+  function handleCroppedAd(image: CroppedImage) {
+    adsLeft.current += 1;
+    setAdsPending(adsLeft.current);
+    const uploading = uploadSlot.current(() =>
+      withUploadRetry(() =>
+        upload({
+          data: {
+            phone,
+            filename: image.filename,
+            contentType: image.contentType,
+            dataBase64: image.base64,
+          },
+        }),
+      ),
+    );
+    uploading.catch(() => {}); // handled below, in order
+    adOrder.current = adOrder.current.then(async () => {
+      try {
+        const res = await uploading;
+        await addImage({ data: { phone, image_url: res.url, ratio: res.ratio } });
+      } catch (err) {
+        setUploadError(err instanceof Error ? err.message : "تعذّر رفع الصورة");
+      } finally {
+        adsLeft.current -= 1;
+        setAdsPending(adsLeft.current);
+        // the last one: show the new ads here and on the site
+        if (adsLeft.current === 0) {
+          void load();
+          refreshPublicStory();
+        }
+      }
+    });
+  }
+
+  function finishAdBatch({ failed }: { failed: number }) {
+    setCropBatch(null);
+    if (failed > 0) {
+      setUploadError(
+        `تعذّر فتح ${arCount(failed, ["صورة واحدة", "صورتين", "صور", "صورة"])}، جرّبي صيغة أخرى (JPG أو PNG)`,
+      );
     }
   }
 
@@ -356,17 +398,21 @@ export function StoryPanel({ phone }: { phone: string }) {
           </div>
           <label className="inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-primary">
             <span className="rounded-full border border-primary px-3 py-1.5">
-              {uploading ? "جارِ الرفع..." : "+ إضافة صورة"}
+              {adsPending > 0 ? `جارِ رفع ${adsPending}...` : "+ إضافة صور"}
             </span>
             <input
               type="file"
               accept="image/*"
+              multiple
               className="hidden"
-              onChange={pickAdPhoto}
-              disabled={uploading}
+              onChange={pickAdPhotos}
             />
           </label>
         </div>
+        <p className="mt-2 text-xs text-muted-foreground">
+          يمكنك اختيار حتى {MAX_PHOTOS_PER_PICK} صورة في المرة الواحدة، وإضافة المزيد بعدها
+        </p>
+        {pickNote && <p className="mt-1 text-xs font-medium text-accent-foreground">{pickNote}</p>}
         {uploadError && <p className="mt-2 text-sm text-destructive">{uploadError}</p>}
 
         <div className="scrollbar-none mt-4 flex gap-3 overflow-x-auto pb-2">
@@ -403,7 +449,7 @@ export function StoryPanel({ phone }: { phone: string }) {
         onConfirm={removeHero}
         onCancel={() => setRemoveHeroOpen(false)}
       />
-      <CropDialog file={cropFile} onCancel={() => setCropFile(null)} onDone={handleCroppedAd} />
+      <CropQueue batch={cropBatch} onCropped={handleCroppedAd} onFinish={finishAdBatch} />
     </div>
   );
 }

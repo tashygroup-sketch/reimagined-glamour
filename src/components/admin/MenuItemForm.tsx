@@ -7,7 +7,11 @@ import {
   variableTotal,
   type StockVariable,
 } from "@/lib/stock";
-import { CropDialog, type CroppedImage } from "./CropDialog";
+import { parseValuePrice } from "@/lib/pricing";
+import { limitConcurrency, MAX_PHOTOS_PER_PICK } from "@/lib/image";
+import { arCount } from "@/lib/utils";
+import { Photo } from "@/components/Photo";
+import { CropQueue, type CropBatch, type CroppedImage } from "./CropDialog";
 import { CategorySelect } from "./CategorySelect";
 
 export type MenuItemDraft = {
@@ -44,14 +48,27 @@ function toLocalInput(iso: string | null | undefined) {
 
 // `uid` only lives in the form (stable React keys, and a photo that finishes uploading lands
 // on the right value even if values were added or removed meanwhile). Not saved.
-export type ValueDraft = { uid: string; label: string; image_url: string | null; stock: string };
+// `price` "" = the product's price; a number = this value's own price (replaces it when chosen).
+export type ValueDraft = {
+  uid: string;
+  label: string;
+  image_url: string | null;
+  stock: string;
+  price: string;
+};
 export type VariableDraft = { uid: string; name: string; values: ValueDraft[] };
 
 type CropTarget = "main" | "extra" | { value: string };
 
 let uidCounter = 0;
 const newUid = () => `u${++uidCounter}`;
-const emptyValue = (): ValueDraft => ({ uid: newUid(), label: "", image_url: null, stock: "" });
+const emptyValue = (): ValueDraft => ({
+  uid: newUid(),
+  label: "",
+  image_url: null,
+  stock: "",
+  price: "",
+});
 
 // Form rows → what the stock rules in src/lib/stock.ts read (empty rows ignored).
 export function draftToStockVariables(variables: VariableDraft[]): StockVariable[] {
@@ -94,6 +111,7 @@ function toDraftVariables(variables: ProductVariant[] | undefined): VariableDraf
       label: x.label,
       image_url: x.image_url,
       stock: x.stock === null || x.stock === undefined ? "" : String(x.stock),
+      price: x.price === null || x.price === undefined ? "" : String(x.price),
     })),
   }));
 }
@@ -111,8 +129,21 @@ function checkVariables(variables: VariableDraft[]): string | null {
     names.add(name);
     const dup = labels.find((l, i) => labels.indexOf(l) !== i);
     if (dup) return `القيمة "${dup}" مكررة في "${name}"`;
+    const badPrice = v.values.find((x) => x.label.trim() && parseValuePrice(x.price) === undefined);
+    if (badPrice) return `سعر "${badPrice.label.trim()}" غير صحيح`;
   }
   return null;
+}
+
+// A price as it's typed: Arabic digits → 0-9, "٫" or "," → ".", one dot at most, nothing else.
+function toDecimal(raw: string) {
+  const text = raw
+    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/[\u066b,]/g, ".")
+    .replace(/[^0-9.]/g, "");
+  const dot = text.indexOf(".");
+  return dot === -1 ? text : text.slice(0, dot + 1) + text.slice(dot + 1).replace(/\./g, "");
 }
 
 // Phone keyboards set to Arabic type ٠١٢٣٤٥٦٧٨٩ (or ۰۱۲...); convert them to 0-9 and drop
@@ -184,7 +215,13 @@ export function MenuItemForm({
   // true while a main photo is on its way (read inside uploads that finish later)
   const mainOnItsWay = useRef(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [pendingCrop, setPendingCrop] = useState<{ file: File; target: CropTarget } | null>(null);
+  // photos picked and waiting for the crop screen (up to MAX_PHOTOS_PER_PICK at once)
+  const [cropBatch, setCropBatch] = useState<CropBatch<CropTarget> | null>(null);
+  const [pickNote, setPickNote] = useState<string | null>(null);
+  // Uploads run 3 at a time; extra photos are added in the order they were picked, even
+  // when a later one finishes uploading first.
+  const uploadSlot = useRef(limitConcurrency(3));
+  const extraOrder = useRef<Promise<void>>(Promise.resolve());
 
   // The display order is no longer a field: keep an item's place if it stays in its original
   // category, otherwise put it at the end of the category it's moved into.
@@ -215,23 +252,42 @@ export function MenuItemForm({
     });
   }
 
+  // Product photos: up to MAX_PHOTOS_PER_PICK in one pick (picking again adds more — there's
+  // no limit on how many a product has). A value (colour) has one photo.
   function pickFile(target: CropTarget) {
     return (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
+      const picked = Array.from(e.target.files ?? []);
       e.target.value = "";
-      if (file) setPendingCrop({ file, target });
+      if (picked.length === 0) return;
+      const max = typeof target === "object" ? 1 : MAX_PHOTOS_PER_PICK;
+      const files = picked.slice(0, max);
+      setUploadError(null);
+      setPickNote(
+        picked.length > max && max > 1
+          ? `اخترتِ ${picked.length} صورة — تُضاف أول ${max} الآن، واختاري الباقي بعدها`
+          : null,
+      );
+      setCropBatch({ files, tag: target });
     };
   }
 
-  // The crop screen closes right away; the upload carries on in the background, so the next
-  // photo can be picked while this one is still uploading.
-  function handleCropped(image: CroppedImage) {
-    const target = pendingCrop?.target ?? "main";
-    setPendingCrop(null);
+  // Each photo starts uploading as soon as it's cropped, in the background, so the next one
+  // can be cropped (or more picked) meanwhile. Picked from «الصورة الرئيسية»: the first one
+  // becomes the main photo and the others extra photos.
+  function handleCropped(image: CroppedImage, target: CropTarget, index: number) {
     setUploadError(null);
     if (typeof target === "object") void uploadValueImage(target.value, image);
-    else if (target === "main") void uploadMain(image);
-    else void uploadExtra(image);
+    else if (target === "main" && index === 0) void uploadMain(image);
+    else uploadExtra(image);
+  }
+
+  function finishBatch({ failed: unreadable }: { failed: number }) {
+    setCropBatch(null);
+    if (unreadable > 0) {
+      setUploadError(
+        `تعذّر فتح ${arCount(unreadable, ["صورة واحدة", "صورتين", "صور", "صورة"])}، جرّبي صيغة أخرى (JPG أو PNG)`,
+      );
+    }
   }
 
   function failed(err: unknown) {
@@ -242,7 +298,7 @@ export function MenuItemForm({
     setUploadingMain(true);
     mainOnItsWay.current = true;
     try {
-      const { url, ratio } = await onUploadImage(image);
+      const { url, ratio } = await uploadSlot.current(() => onUploadImage(image));
       setDraft((d) => ({ ...d, image_url: url, image_ratio: ratio }));
     } catch (err) {
       failed(err);
@@ -252,10 +308,16 @@ export function MenuItemForm({
     }
   }
 
-  async function uploadExtra(image: CroppedImage) {
+  function uploadExtra(image: CroppedImage) {
     setPendingExtras((n) => n + 1);
+    const uploading = uploadSlot.current(() => onUploadImage(image));
+    uploading.catch(() => {}); // handled below, in order
+    extraOrder.current = extraOrder.current.then(() => addExtra(uploading));
+  }
+
+  async function addExtra(uploading: Promise<{ url: string; ratio: number | null }>) {
     try {
-      const { url, ratio } = await onUploadImage(image);
+      const { url, ratio } = await uploading;
       setDraft((d) =>
         // No main photo yet: the first photo added with «+ صورة» becomes the main one —
         // it's the one shown on the product's card, so the card is never left empty.
@@ -277,7 +339,7 @@ export function MenuItemForm({
   async function uploadValueImage(valueUid: string, image: CroppedImage) {
     setUploadingValues((ids) => [...ids, valueUid]);
     try {
-      const { url } = await onUploadImage(image);
+      const { url } = await uploadSlot.current(() => onUploadImage(image));
       // by uid: lands on the right value even if rows were added/removed meanwhile (and is
       // simply dropped if that value was deleted)
       updateValue(valueUid, { image_url: url });
@@ -349,7 +411,7 @@ export function MenuItemForm({
         }
         onSubmit(draft);
       }}
-      className="space-y-4 rounded-3xl bg-card p-5 shadow-[var(--shadow-card)]"
+      className="min-w-0 space-y-4 rounded-3xl bg-card p-5 shadow-[var(--shadow-card)]"
     >
       <div className="grid gap-3 sm:grid-cols-2">
         <Field
@@ -642,7 +704,9 @@ export function MenuItemForm({
         </div>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
           مثل اللون أو المقاس. إذا أضفتِ متغيرًا، يجب على الزبونة اختيار قيمة منه قبل الطلب. الكمية
-          لكل قيمة اختيارية: فارغة = غير محدودة، 0 = نفذت (تظهر رمادية للزبونة حتى تزيديها).
+          لكل قيمة اختيارية: فارغة = غير محدودة، 0 = نفذت (تظهر رمادية للزبونة حتى تزيديها). السعر
+          لكل قيمة اختياري: فارغ = سعر المنتج، وإذا كتبتِ سعرًا يصبح هو السعر عند اختيار هذه القيمة
+          (والخصم والكود يُطبقان عليه بنفس النسبة).
         </p>
 
         {draft.variables.map((v) => {
@@ -671,91 +735,119 @@ export function MenuItemForm({
                 </button>
               </div>
 
-              <div className="mt-2 flex items-center gap-2 px-0.5 text-[11px] text-muted-foreground">
-                <span className="w-12 shrink-0 text-center">الصورة</span>
-                <span className="min-w-0 flex-1">القيمة</span>
-                <span className="w-16 shrink-0 text-center">الكمية</span>
-                <span className="w-9 shrink-0" />
-              </div>
-              <div className="mt-1 space-y-2">
+              <div className="mt-2 space-y-3">
                 {v.values.map((val) => {
                   const busyHere = uploadingValues.includes(val.uid);
                   const soldOut = val.stock !== "" && Number(val.stock) === 0;
+                  const badPrice = parseValuePrice(val.price) === undefined;
                   return (
-                    <div key={val.uid} className="flex items-center gap-2">
-                      <div className="relative h-12 w-12 shrink-0">
-                        {/* The file input sits inside the tile (visually hidden, not display:none)
+                    <div key={val.uid} className="rounded-2xl bg-background/70 p-2">
+                      <div className="flex items-center gap-2">
+                        <div className="relative h-12 w-12 shrink-0">
+                          {/* The file input sits inside the tile (visually hidden, not display:none)
                             so tapping the tile opens the photo picker reliably on iPhone. */}
-                        <label
-                          className="relative flex h-12 w-12 cursor-pointer items-center justify-center overflow-hidden rounded-xl border border-dashed border-primary/60 bg-background text-[10px] text-primary"
-                          title="صورة القيمة"
-                        >
-                          {val.image_url ? (
-                            <img
-                              src={val.image_url}
-                              alt=""
-                              className="h-full w-full object-cover"
+                          <label
+                            className="relative flex h-12 w-12 cursor-pointer items-center justify-center overflow-hidden rounded-xl border border-dashed border-primary/60 bg-background text-[10px] text-primary"
+                            title="صورة القيمة"
+                          >
+                            {val.image_url ? (
+                              <img
+                                src={val.image_url}
+                                alt=""
+                                className="h-full w-full object-cover"
+                              />
+                            ) : (
+                              !busyHere && "+ صورة"
+                            )}
+                            {busyHere && (
+                              <span className="absolute inset-0 flex items-center justify-center bg-background/80 text-xs text-primary">
+                                ...
+                              </span>
+                            )}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="sr-only"
+                              disabled={busyHere}
+                              onChange={pickFile({ value: val.uid })}
                             />
-                          ) : (
-                            !busyHere && "+ صورة"
+                          </label>
+                          {val.image_url && !busyHere && (
+                            <button
+                              type="button"
+                              onClick={() => updateValue(val.uid, { image_url: null })}
+                              aria-label="إزالة صورة القيمة"
+                              className="absolute -top-1.5 -left-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-ink/80 text-[10px] text-white"
+                            >
+                              ✕
+                            </button>
                           )}
-                          {busyHere && (
-                            <span className="absolute inset-0 flex items-center justify-center bg-background/80 text-xs text-primary">
-                              ...
-                            </span>
-                          )}
+                        </div>
+                        <input
+                          value={val.label}
+                          placeholder="مثال: أحمر"
+                          aria-label="القيمة"
+                          onChange={(e) => updateValue(val.uid, { label: e.target.value })}
+                          className="w-full min-w-0 rounded-xl border border-border bg-background px-3 py-2.5 text-base outline-none focus:border-primary"
+                        />
+                        <button
+                          type="button"
+                          aria-label="حذف القيمة"
+                          onClick={() =>
+                            setVariables((vars) =>
+                              vars.map((x) =>
+                                x.uid === v.uid
+                                  ? { ...x, values: x.values.filter((y) => y.uid !== val.uid) }
+                                  : x,
+                              ),
+                            )
+                          }
+                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-destructive"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div className="mt-2 flex gap-2">
+                        {/* empty price = the product's price (shown faded as the hint) */}
+                        <label
+                          className={`flex min-w-0 flex-1 items-center gap-1 rounded-xl border bg-background ps-2.5 focus-within:border-primary ${
+                            badPrice ? "border-destructive" : "border-border"
+                          }`}
+                        >
+                          <span className="shrink-0 text-[11px] text-muted-foreground">السعر</span>
                           <input
-                            type="file"
-                            accept="image/*"
-                            className="sr-only"
-                            disabled={busyHere}
-                            onChange={pickFile({ value: val.uid })}
+                            inputMode="decimal"
+                            dir="ltr"
+                            value={val.price}
+                            placeholder={draft.price.trim() || "—"}
+                            aria-label={`سعر ${val.label || "القيمة"}`}
+                            onChange={(e) =>
+                              updateValue(val.uid, { price: toDecimal(e.target.value) })
+                            }
+                            className="w-full min-w-0 bg-transparent px-1 py-2 text-center text-base text-ink outline-none placeholder:text-muted-foreground/60"
                           />
                         </label>
-                        {val.image_url && !busyHere && (
-                          <button
-                            type="button"
-                            onClick={() => updateValue(val.uid, { image_url: null })}
-                            aria-label="إزالة صورة القيمة"
-                            className="absolute -top-1.5 -left-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-ink/80 text-[10px] text-white"
-                          >
-                            ✕
-                          </button>
-                        )}
+                        <label
+                          className={`flex min-w-0 flex-1 items-center gap-1 rounded-xl border bg-background ps-2.5 focus-within:border-primary ${
+                            soldOut ? "border-destructive" : "border-border"
+                          }`}
+                        >
+                          <span className="shrink-0 text-[11px] text-muted-foreground">الكمية</span>
+                          <input
+                            inputMode="numeric"
+                            dir="ltr"
+                            value={val.stock}
+                            placeholder="∞"
+                            aria-label={`كمية ${val.label || "القيمة"}`}
+                            onChange={(e) =>
+                              updateValue(val.uid, { stock: toDigits(e.target.value) })
+                            }
+                            className={`w-full min-w-0 bg-transparent px-1 py-2 text-center text-base outline-none placeholder:text-muted-foreground ${
+                              soldOut ? "text-destructive" : "text-ink"
+                            }`}
+                          />
+                        </label>
                       </div>
-                      <input
-                        value={val.label}
-                        placeholder="مثال: أحمر"
-                        onChange={(e) => updateValue(val.uid, { label: e.target.value })}
-                        className="w-full min-w-0 rounded-xl border border-border bg-background px-3 py-2.5 text-base outline-none focus:border-primary"
-                      />
-                      <input
-                        inputMode="numeric"
-                        dir="ltr"
-                        value={val.stock}
-                        placeholder="∞"
-                        aria-label={`كمية ${val.label || "القيمة"}`}
-                        onChange={(e) => updateValue(val.uid, { stock: toDigits(e.target.value) })}
-                        className={`w-16 shrink-0 rounded-xl border bg-background px-1 py-2.5 text-center text-base outline-none placeholder:text-muted-foreground focus:border-primary ${
-                          soldOut ? "border-destructive text-destructive" : "border-border text-ink"
-                        }`}
-                      />
-                      <button
-                        type="button"
-                        aria-label="حذف القيمة"
-                        onClick={() =>
-                          setVariables((vars) =>
-                            vars.map((x) =>
-                              x.uid === v.uid
-                                ? { ...x, values: x.values.filter((y) => y.uid !== val.uid) }
-                                : x,
-                            ),
-                          )
-                        }
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-destructive"
-                      >
-                        ✕
-                      </button>
                     </div>
                   );
                 })}
@@ -793,9 +885,9 @@ export function MenuItemForm({
         <div className="scrollbar-none flex gap-2 overflow-x-auto pb-1">
           {draft.image_url ? (
             <div className="relative h-24 w-[72px] shrink-0">
-              <img
+              <Photo
+                thumb
                 src={draft.image_url}
-                alt=""
                 className="h-full w-full rounded-xl border-2 border-primary object-cover"
               />
               <span className="absolute inset-x-0 bottom-0 rounded-b-xl bg-primary py-0.5 text-center text-[10px] font-bold text-primary-foreground">
@@ -809,7 +901,7 @@ export function MenuItemForm({
           )}
           {draft.extra_images.map((url, idx) => (
             <div key={`${url}-${idx}`} className="relative h-24 w-[72px] shrink-0">
-              <img src={url} alt="" className="h-full w-full rounded-xl object-cover" />
+              <Photo thumb src={url} className="h-full w-full rounded-xl object-cover" />
               <button
                 type="button"
                 onClick={() => removeExtraImage(idx)}
@@ -829,10 +921,22 @@ export function MenuItemForm({
             </div>
           ))}
           <label className="relative flex h-24 w-[72px] shrink-0 cursor-pointer items-center justify-center rounded-xl border border-dashed border-primary/60 text-xs text-primary">
-            + صورة
-            <input type="file" accept="image/*" className="sr-only" onChange={pickFile("extra")} />
+            + صور
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              className="sr-only"
+              onChange={pickFile("extra")}
+            />
           </label>
         </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {draft.extra_images.length + (draft.image_url ? 1 : 0) > 0 &&
+            `${arCount(draft.extra_images.length + (draft.image_url ? 1 : 0), ["صورة واحدة", "صورتان", "صور", "صورة"])} — `}
+          يمكنك اختيار حتى {MAX_PHOTOS_PER_PICK} صورة في المرة الواحدة، وإضافة المزيد بعدها
+        </p>
+        {pickNote && <p className="mt-1 text-xs font-medium text-accent-foreground">{pickNote}</p>}
 
         <label className="relative mt-3 inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-primary">
           <span className="rounded-full border border-primary px-3 py-1.5">
@@ -845,6 +949,7 @@ export function MenuItemForm({
           <input
             type="file"
             accept="image/*"
+            multiple
             className="sr-only"
             onChange={pickFile("main")}
             disabled={uploadingMain}
@@ -871,11 +976,7 @@ export function MenuItemForm({
         </button>
       </div>
 
-      <CropDialog
-        file={pendingCrop?.file ?? null}
-        onCancel={() => setPendingCrop(null)}
-        onDone={handleCropped}
-      />
+      <CropQueue batch={cropBatch} onCropped={handleCropped} onFinish={finishBatch} />
     </form>
   );
 }

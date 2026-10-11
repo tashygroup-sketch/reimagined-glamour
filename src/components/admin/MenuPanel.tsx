@@ -20,6 +20,8 @@ import {
 } from "@/lib/shop.functions";
 import { SQUARE_CROP, withUploadRetry } from "@/lib/image";
 import { parseStock } from "@/lib/stock";
+import { parseValuePrice } from "@/lib/pricing";
+import { formatPrice } from "@/components/ProductSheet";
 import { useCloseLayer, withLayer } from "@/lib/back-layer";
 import { buildSearchIndex, searchProducts } from "@/lib/search";
 import { letterOf, sortByName } from "@/lib/sort";
@@ -30,6 +32,11 @@ import { LetterPicker } from "@/components/LetterPicker";
 import { CropDialog, type CroppedImage } from "./CropDialog";
 import { MenuItemForm, type MenuItemDraft } from "./MenuItemForm";
 import { Reveal } from "@/components/Reveal";
+import { ShowMore } from "@/components/ShowMore";
+
+// Products drawn at first (and added each time the owner scrolls near the end): a shop with
+// thousands of products opens quickly on a phone.
+const ADMIN_PAGE = 60;
 import { ConfirmDialog } from "./ConfirmDialog";
 
 export function MenuPanel({ phone }: { phone: string }) {
@@ -57,6 +64,12 @@ export function MenuPanel({ phone }: { phone: string }) {
   // the product just jumped to with the letter list (outlined for a moment)
   const [jumpedTo, setJumpedTo] = useState<string | null>(null);
   const [thumbs, setThumbs] = useState<ThumbProgress | null>(null);
+  // how many products are drawn (starts over for a new search)
+  const [more, setMore] = useState({ key: "", count: ADMIN_PAGE });
+  const shownCount = more.key === query.trim() ? more.count : ADMIN_PAGE;
+  const showUpTo = (count: number) => setMore({ key: query.trim(), count });
+  // a product to scroll to once it's drawn (after a letter was picked)
+  const [jumpTarget, setJumpTarget] = useState<string | null>(null);
   const searchIndex = useMemo(() => buildSearchIndex(items ?? []), [items]);
   const results = useMemo(
     () => (query.trim() ? searchProducts(searchIndex, query) : null),
@@ -92,8 +105,8 @@ export function MenuPanel({ phone }: { phone: string }) {
   async function load() {
     try {
       const [rows, cats, codes] = await Promise.all([
-        fetchMenu(),
-        fetchCategories(),
+        fetchMenu({ data: { fresh: true } }),
+        fetchCategories({ data: { fresh: true } }),
         fetchDiscounts({ data: { phone } }).catch(() => [] as AdminDiscount[]),
       ]);
       setItems(rows);
@@ -110,6 +123,24 @@ export function MenuPanel({ phone }: { phone: string }) {
   }, []);
 
   const categories = [...new Set((items ?? []).map((i) => i.category))];
+  // The page order: categories as listed, products alphabetical inside each.
+  const ordered = useMemo(() => {
+    const all = items ?? [];
+    const cats = [...new Set(all.map((i) => i.category))];
+    return cats.flatMap((cat) => sortByName(all.filter((i) => i.category === cat)));
+  }, [items]);
+  const drawn = useMemo(
+    () => new Set(ordered.slice(0, shownCount).map((i) => i.id)),
+    [ordered, shownCount],
+  );
+
+  useEffect(() => {
+    if (!jumpTarget) return;
+    const el = document.getElementById(`admin-item-${jumpTarget}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    setJumpTarget(null);
+  }, [jumpTarget, shownCount]);
 
   // While this panel is open: make the light copy of every photo that doesn't have one yet
   // (photos uploaded before light copies existed), and find photos whose file is gone.
@@ -149,18 +180,14 @@ export function MenuPanel({ phone }: { phone: string }) {
   // The page order: categories as listed, products alphabetical inside each.
   const letters = [...new Set((items ?? []).map((i) => letterOf(i.name)))];
   function jumpToLetter(letter: string) {
-    for (const cat of categories) {
-      const target = sortByName((items ?? []).filter((i) => i.category === cat)).find(
-        (i) => letterOf(i.name) === letter,
-      );
-      if (!target) continue;
-      document
-        .getElementById(`admin-item-${target.id}`)
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-      setJumpedTo(target.id);
-      window.setTimeout(() => setJumpedTo(null), 1800);
-      return;
-    }
+    const index = ordered.findIndex((i) => letterOf(i.name) === letter);
+    if (index === -1) return;
+    const target = ordered[index]!;
+    // not drawn yet: draw the list down to it first
+    if (index >= shownCount) showUpTo(index + ADMIN_PAGE);
+    setJumpTarget(target.id);
+    setJumpedTo(target.id);
+    window.setTimeout(() => setJumpedTo(null), 1800);
   }
 
   function nextSortOrderFor(category: string) {
@@ -200,7 +227,7 @@ export function MenuPanel({ phone }: { phone: string }) {
         url = res.url;
       }
       await setCategoryImage({ data: { phone, name, image_url: url } });
-      setCategoryInfo(await fetchCategories());
+      setCategoryInfo(await fetchCategories({ data: { fresh: true } }));
       queryClient.invalidateQueries({ queryKey: ["categories"] });
     } catch (err) {
       setCategoryError(err instanceof Error ? err.message : "تعذّر حفظ صورة التصنيف");
@@ -252,6 +279,8 @@ export function MenuPanel({ phone }: { phone: string }) {
                   label: x.label,
                   image_url: x.image_url,
                   stock: parseStock(x.stock),
+                  // checked by the form before saving; empty = the product's price
+                  price: parseValuePrice(x.price) ?? null,
                 })),
             })),
             min_qty: Math.max(1, Math.floor(Number(draft.min_qty) || 1)),
@@ -395,6 +424,7 @@ export function MenuPanel({ phone }: { phone: string }) {
                   <span className={x.stock === 0 ? "text-destructive line-through" : ""}>
                     {x.label}
                   </span>
+                  {x.price !== null ? ` ${formatPrice(x.price)} د.ل` : ""}
                   {x.stock === 0 ? " (نفذ)" : x.stock !== null ? ` (${x.stock})` : ""}
                 </span>
               ))}
@@ -534,8 +564,14 @@ export function MenuPanel({ phone }: { phone: string }) {
                 {arCount(results.length, ["نتيجة واحدة", "نتيجتان", "نتائج", "نتيجة"])}
               </p>
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {results.map((item) => renderItem(item, true))}
+                {results.slice(0, shownCount).map((item) => renderItem(item, true))}
               </div>
+              {results.length > shownCount && (
+                <ShowMore
+                  left={results.length - shownCount}
+                  onMore={() => showUpTo(shownCount + ADMIN_PAGE)}
+                />
+              )}
             </div>
           ) : (
             <div className="py-10 text-center">
@@ -554,61 +590,76 @@ export function MenuPanel({ phone }: { phone: string }) {
           )
         ) : (
           <div className="space-y-5">
-            {categories.map((cat) => (
-              <div key={cat} id={`admin-cat-${cat.replace(/\s+/g, "-")}`} className="scroll-mt-24">
-                <div className="mb-3 flex items-center gap-3">
-                  <label className="photo-slot relative flex h-16 w-16 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border border-dashed border-primary/60 bg-muted text-center text-[10px] leading-4 text-primary">
-                    {categoryImage(cat) ? (
-                      <Photo
-                        thumb
-                        src={categoryImage(cat)!}
-                        className="h-full w-full object-cover"
+            {categories.map((cat) => {
+              // categories further down than what's drawn so far appear when scrolled to
+              const catItems = sortByName(items.filter((item) => item.category === cat)).filter(
+                (item) => drawn.has(item.id),
+              );
+              if (catItems.length === 0) return null;
+              return (
+                <div
+                  key={cat}
+                  id={`admin-cat-${cat.replace(/\s+/g, "-")}`}
+                  className="scroll-mt-24"
+                >
+                  <div className="mb-3 flex items-center gap-3">
+                    <label className="photo-slot relative flex h-16 w-16 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border border-dashed border-primary/60 bg-muted text-center text-[10px] leading-4 text-primary">
+                      {categoryImage(cat) ? (
+                        <Photo
+                          thumb
+                          src={categoryImage(cat)!}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : categoryBusy === cat ? (
+                        "..."
+                      ) : (
+                        "+ صورة القسم"
+                      )}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        disabled={categoryBusy !== null}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = "";
+                          if (file) setCategoryCrop({ file, name: cat });
+                        }}
                       />
-                    ) : categoryBusy === cat ? (
-                      "..."
-                    ) : (
-                      "+ صورة القسم"
+                    </label>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-lg text-ink">{cat}</h3>
+                      <p className="text-xs text-muted-foreground">
+                        {categoryBusy === cat
+                          ? "جارِ الحفظ..."
+                          : categoryImage(cat)
+                            ? "اضغطي على الصورة لتغييرها"
+                            : "صورة المربع الذي يظهر في الصفحة الرئيسية"}
+                      </p>
+                    </div>
+                    {categoryImage(cat) && (
+                      <button
+                        type="button"
+                        disabled={categoryBusy !== null}
+                        onClick={() => changeCategoryImage(cat, null)}
+                        className="shrink-0 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground"
+                      >
+                        إزالة الصورة
+                      </button>
                     )}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      disabled={categoryBusy !== null}
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        e.target.value = "";
-                        if (file) setCategoryCrop({ file, name: cat });
-                      }}
-                    />
-                  </label>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-lg text-ink">{cat}</h3>
-                    <p className="text-xs text-muted-foreground">
-                      {categoryBusy === cat
-                        ? "جارِ الحفظ..."
-                        : categoryImage(cat)
-                          ? "اضغطي على الصورة لتغييرها"
-                          : "صورة المربع الذي يظهر في الصفحة الرئيسية"}
-                    </p>
                   </div>
-                  {categoryImage(cat) && (
-                    <button
-                      type="button"
-                      disabled={categoryBusy !== null}
-                      onClick={() => changeCategoryImage(cat, null)}
-                      className="shrink-0 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground"
-                    >
-                      إزالة الصورة
-                    </button>
-                  )}
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {catItems.map((item) => renderItem(item))}
+                  </div>
                 </div>
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {sortByName(items.filter((item) => item.category === cat)).map((item) =>
-                    renderItem(item),
-                  )}
-                </div>
-              </div>
-            ))}
+              );
+            })}
+            {ordered.length > shownCount && (
+              <ShowMore
+                left={ordered.length - shownCount}
+                onMore={() => showUpTo(shownCount + ADMIN_PAGE)}
+              />
+            )}
           </div>
         )}
       </PhotoGroup>
