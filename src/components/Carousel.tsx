@@ -28,9 +28,12 @@ function useFallbackRatio(src: string, skip: boolean, onRatio: (ratio: number) =
 
 function Slide({
   image,
+  load,
   onMeasured,
 }: {
   image: CarouselImage;
+  // false = not near the photo on screen yet: nothing is downloaded until it gets close
+  load: boolean;
   onMeasured: (ratio: number) => void;
 }) {
   const known = typeof image.ratio === "number" ? image.ratio : null;
@@ -45,7 +48,7 @@ function Slide({
       className="w-full shrink-0 snap-center bg-contain bg-center bg-no-repeat"
       style={underlay ? { backgroundImage: `url("${underlay}")` } : undefined}
     >
-      <Photo src={image.url} className="h-full w-full object-contain" />
+      {load && <Photo src={image.url} className="h-full w-full object-contain" />}
     </div>
   );
 }
@@ -74,8 +77,12 @@ function findActiveIndex(track: HTMLElement): number {
 
 // autoPlay: ms between slides (used for the ads card). Stops for good once the visitor
 // swipes, and never runs for people who ask their device for reduced motion.
+const MAX_DOTS = 12;
+
 export function Carousel({ images, autoPlay }: { images: CarouselImage[]; autoPlay?: number }) {
   const trackRef = useRef<HTMLDivElement>(null);
+  // slides already downloaded (they stay, so swiping back never shows an empty photo)
+  const opened = useRef(new Set<number>());
   const userTookOver = useRef(false);
   const [active, setActive] = useState(0);
   const [measured, setMeasured] = useState<Record<number, number>>({});
@@ -111,6 +118,10 @@ export function Carousel({ images, autoPlay }: { images: CarouselImage[]; autoPl
   if (images.length === 0) return null;
 
   const safeActive = Math.min(Math.max(active, 0), images.length - 1);
+  // A product can have dozens of photos: only the one on screen and the two on each side are
+  // downloaded (and kept once they are), not all of them the moment the page opens.
+  const near = (i: number) => Math.abs(i - safeActive) <= 2 || opened.current.has(i);
+  for (let i = safeActive - 2; i <= safeActive + 2; i++) opened.current.add(i);
   const activeImage = images[safeActive];
   const ratio =
     (typeof activeImage?.ratio === "number" ? activeImage.ratio : null) ??
@@ -132,11 +143,18 @@ export function Carousel({ images, autoPlay }: { images: CarouselImage[]; autoPl
           <Slide
             key={img.url}
             image={img}
+            load={near(i)}
             onMeasured={(r) => setMeasured((prev) => ({ ...prev, [i]: r }))}
           />
         ))}
       </div>
-      {images.length > 1 && (
+      {images.length > MAX_DOTS && (
+        // too many photos for dots to fit on a phone: "3 / 40" instead
+        <p dir="ltr" className="py-1.5 text-center text-xs font-bold text-primary tabular-nums">
+          {safeActive + 1} / {images.length}
+        </p>
+      )}
+      {images.length > 1 && images.length <= MAX_DOTS && (
         <div className="flex justify-center gap-1.5 py-2">
           {images.map((_, i) => (
             <button
