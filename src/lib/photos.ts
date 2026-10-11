@@ -14,9 +14,9 @@
 // (src/lib/thumbs.ts). A photo whose light copy doesn't exist yet simply falls back to the
 // full photo.
 //
-// The shop downloads the light copies of the whole catalogue quietly in the background as
-// soon as the page opens, so by the time a customer opens a category its photos are already
-// on the phone and appear at once.
+// The shop downloads light copies quietly in the background as soon as the page opens — the
+// whole catalogue for a small shop, the first screens of every category for a big one — so by
+// the time a customer opens a category its photos are already on the phone and appear at once.
 
 // Same rule as ownPhotoName() on the server: a file directly inside the menu-photos bucket.
 const BUCKET_PHOTO = /^(.*\/storage\/v1\/object\/public\/menu-photos\/)([A-Za-z0-9._-]+)$/;

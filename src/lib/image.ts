@@ -145,6 +145,45 @@ export async function cropToBase64(
   return { base64: await blobToBase64(blob), contentType: "image/jpeg", thumbBase64 };
 }
 
+// The biggest centred part of the photo with the output's shape — what "قص الباقي تلقائيًا"
+// uses when many photos are picked at once, so they don't each need cropping by hand.
+export async function autoCropToBase64(
+  file: Blob,
+  width: number = CROP_WIDTH,
+  height: number = CROP_HEIGHT,
+) {
+  const prepared = await prepareImage(file);
+  const img = await loadImage(prepared);
+  const w0 = img.naturalWidth;
+  const h0 = img.naturalHeight;
+  if (!w0 || !h0) throw new Error("تعذّر فتح الصورة، جرّبي صورة أخرى (JPG أو PNG)");
+  const aspect = width / height;
+  const cw = Math.min(w0, h0 * aspect);
+  const ch = cw / aspect;
+  const area = { x: (w0 - cw) / 2, y: (h0 - ch) / 2, width: cw, height: ch };
+  return cropToBase64(prepared, area, 0.88, width, height);
+}
+
+// How many photos can be picked in one go (the phone's photo picker allows several).
+export const MAX_PHOTOS_PER_PICK = 40;
+
+// Runs at most `atOnce` tasks at the same time; the others wait their turn. Many photos are
+// uploaded a few at a time, so a weak connection isn't swamped and each one finishes.
+export function limitConcurrency(atOnce: number) {
+  let running = 0;
+  const waiting: (() => void)[] = [];
+  return async function run<T>(task: () => Promise<T>): Promise<T> {
+    if (running >= atOnce) await new Promise<void>((go) => waiting.push(go));
+    running++;
+    try {
+      return await task();
+    } finally {
+      running--;
+      waiting.shift()?.();
+    }
+  };
+}
+
 // A light copy of an already uploaded photo (for photos uploaded before light copies existed).
 export async function makeThumbBase64(photo: Blob): Promise<string> {
   const img = await loadImage(photo);

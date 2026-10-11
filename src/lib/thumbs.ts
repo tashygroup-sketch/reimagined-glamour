@@ -71,10 +71,22 @@ function handleOne(url: string, tools: Tools): Promise<void> {
   return work;
 }
 
+// Whether the light copy is already stored. Asked without downloading it (a HEAD request has
+// no body), so a shop with thousands of photos doesn't download them all each time the
+// control panel opens; a browser that can't ask that way downloads it as before.
+async function thumbExists(small: string): Promise<boolean> {
+  try {
+    const res = await fetch(small, { method: "HEAD", cache: "no-store" });
+    return res.ok;
+  } catch {
+    return preload(small);
+  }
+}
+
 async function makeOne(url: string, tools: Tools) {
   const small = thumbUrl(url);
   if (!small || finished.has(url)) return;
-  if (await preload(small)) {
+  if (await thumbExists(small)) {
     finished.add(url);
     return;
   }
@@ -98,7 +110,7 @@ async function makeOne(url: string, tools: Tools) {
   finished.add(url);
 }
 
-// Goes through `jobs` two at a time, reporting progress. `stopped()` lets the caller end it
+// Goes through `jobs` four at a time, reporting progress. `stopped()` lets the caller end it
 // early (the panel was closed, or the product list changed and a new pass is starting).
 export async function ensureThumbs(
   jobs: ThumbJob[],
@@ -134,5 +146,5 @@ export async function ensureThumbs(
       if (!stopped()) report();
     }
   }
-  await Promise.all([worker(), worker()]);
+  await Promise.all([worker(), worker(), worker(), worker()]);
 }
