@@ -2,6 +2,8 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { rememberEnv } from "./lib/store.server";
+import { servePhoto } from "./lib/photo-serve.server";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -46,6 +48,22 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
+    // The shop's database and photo store (Cloudflare bindings) come with the request.
+    rememberEnv(env);
+    rememberEnv(
+      (request as Request & { runtime?: { cloudflare?: { env?: unknown } } }).runtime?.cloudflare
+        ?.env,
+    );
+    // The shop's photos: /photos/<name> and /photos/thumbs/<name>, straight from the store.
+    const path = new URL(request.url).pathname;
+    if (path.startsWith("/photos/") && (request.method === "GET" || request.method === "HEAD")) {
+      try {
+        return await servePhoto(request, decodeURIComponent(path.slice("/photos/".length)));
+      } catch (error) {
+        console.error(error);
+        return new Response("Photo unavailable", { status: 503 });
+      }
+    }
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
