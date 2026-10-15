@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
-import { checkDiscountCode, coverImage, effectivePrice, type MenuItem } from "@/lib/shop.functions";
+import { checkDiscountCode, coverImage, type MenuItem } from "@/lib/shop.functions";
+import { discountedFrom, payPrice, regularPriceRange } from "@/lib/pricing";
 import { useCart, type CartOption } from "@/lib/cart";
 import { Carousel } from "@/components/Carousel";
 import { Photo } from "@/components/Photo";
@@ -134,7 +135,13 @@ export function ProductSheet({
     applied && (applied.ends_at === null || new Date(applied.ends_at).getTime() > now)
       ? applied
       : null;
-  const unitPrice = appliedLive ? appliedLive.price : effectivePrice(item);
+  // A value with its own price changes the price (src/lib/pricing.ts). Until every value
+  // that decides it is chosen, the lowest possible price is shown as "من …".
+  const payOf = (regular: number) =>
+    appliedLive ? discountedFrom(item, regular, appliedLive.price) : payPrice(item, regular);
+  const range = regularPriceRange(item, chosen);
+  const settled = range.min === range.max;
+  const unitPrice = payOf(range.min);
 
   const soldOut = item.stock === 0 || remaining === 0;
   // The product as a whole can't reach its minimum any more.
@@ -238,12 +245,13 @@ export function ProductSheet({
           <div className="flex items-start justify-between gap-3">
             <h2 className="text-xl leading-snug font-bold text-ink">{item.name}</h2>
             <div className="shrink-0 text-end">
-              {unitPrice < Number(item.price) && (
+              {unitPrice < range.min && (
                 <p className="text-sm text-muted-foreground line-through">
-                  {formatPrice(item.price)} د.ل
+                  {formatPrice(range.min)} د.ل
                 </p>
               )}
               <p className="text-lg font-extrabold text-primary">
+                {!settled && <span className="text-xs font-bold">من </span>}
                 {formatPrice(unitPrice)} <span className="text-xs font-bold">د.ل</span>
               </p>
             </div>
@@ -313,6 +321,14 @@ export function ProductSheet({
                           />
                         )}
                         <span className={unavailable ? "line-through" : ""}>{val.label}</span>
+                        {/* this value's own price (it replaces the product's price) */}
+                        {val.price !== null && (
+                          <span
+                            className={`text-xs font-bold ${selected ? "" : "text-muted-foreground"}`}
+                          >
+                            {formatPrice(payOf(val.price))} د.ل
+                          </span>
+                        )}
                         {tag && (
                           <span className="rounded-full bg-card px-1.5 text-[11px] font-bold">
                             {tag}
@@ -337,8 +353,8 @@ export function ProductSheet({
               {appliedLive ? (
                 <div className="mt-2 rounded-2xl border border-primary/40 bg-accent p-3 text-sm">
                   <p className="font-bold text-accent-foreground">
-                    تم تطبيق الكود «{appliedLive.code}» — السعر بعد الخصم{" "}
-                    {formatPrice(appliedLive.price)} د.ل
+                    تم تطبيق الكود «{appliedLive.code}» — السعر بعد الخصم {!settled && "من "}
+                    {formatPrice(unitPrice)} د.ل
                   </p>
                   {endsIn && (
                     <p className="mt-1 text-accent-foreground">
@@ -431,9 +447,11 @@ export function ProductSheet({
                 style={{ backgroundImage: "var(--gradient-pink)" }}
               >
                 <span>أضيفي للسلة</span>
-                <span>
-                  {formatPrice(unitPrice * qty)} <span className="text-xs">د.ل</span>
-                </span>
+                {settled && (
+                  <span>
+                    {formatPrice(unitPrice * qty)} <span className="text-xs">د.ل</span>
+                  </span>
+                )}
               </button>
             </div>
           )}
