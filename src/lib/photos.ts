@@ -6,8 +6,8 @@
 //
 // So every photo also has a light copy (about 480px wide, 25–45 KB) stored next to it:
 //
-//     …/menu-photos/<name>.jpg           the full photo (product page)
-//     …/menu-photos/thumbs/<name>.jpg    the light copy (cards, category squares, the cart)
+//     /photos/<name>.jpg           the full photo (product page)
+//     /photos/thumbs/<name>.jpg    the light copy (cards, category squares, the cart)
 //
 // The light copy is made in the owner's browser: when a photo is uploaded, and — for photos
 // uploaded before this existed — in the background whenever the control panel is open
@@ -18,8 +18,10 @@
 // whole catalogue for a small shop, the first screens of every category for a big one — so by
 // the time a customer opens a category its photos are already on the phone and appear at once.
 
-// Same rule as ownPhotoName() on the server: a file directly inside the menu-photos bucket.
-const BUCKET_PHOTO = /^(.*\/storage\/v1\/object\/public\/menu-photos\/)([A-Za-z0-9._-]+)$/;
+// Same rule as ownPhotoName() on the server: one of the shop's own photos, served from
+// /photos/<name> (Cloudflare), or an older address in the menu-photos storage folder.
+const BUCKET_PHOTO =
+  /^(\/photos\/|.*\/storage\/v1\/object\/public\/menu-photos\/)([A-Za-z0-9._-]+)$/;
 
 // Light copies fit inside this box (the 3:4 product shape, or 480×480 for category squares).
 export const THUMB_MAX_WIDTH = 480;

@@ -1,7 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { createClient } from "@supabase/supabase-js";
 import { imageSize } from "image-size";
-import type { Database, Json } from "@/integrations/supabase/types";
 import { hasValueStock, overStockValue, parseStock, totalFromValues } from "@/lib/stock";
 import { LIBYAN_MOBILE, normalizeLibyanPhone } from "@/lib/phone";
 import { codePriceFor, parseValuePrice, salePriceFor } from "@/lib/pricing";
@@ -262,21 +260,14 @@ export const ORDER_STATUSES = ["جديد", "قيد التحضير", "جاهز ل
 export const DELIVERED = "تم التسليم";
 const NEW_ORDER = "جديد";
 
-function publicClient() {
-  const key = process.env["SUPABASE_PUBLISHABLE_KEY"]!;
-  return createClient(process.env["SUPABASE_URL"]!, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: {
-      fetch: (input, init) => {
-        const h = new Headers(init?.headers);
-        if (key.startsWith("sb_") && h.get("Authorization") === `Bearer ${key}`)
-          h.delete("Authorization");
-        h.set("apikey", key);
-        return fetch(input, { ...init, headers: h });
-      },
-    },
-  });
+// The shop's storage on Cloudflare (D1 for the data, KV for the photos) — see
+// src/lib/store.server.ts. It answers like the Supabase client this file was written for.
+async function serverStore() {
+  const { getStore } = await import("@/lib/store.server");
+  return getStore();
 }
+// What used to be the public (read-only) client: on Cloudflare it's the same store.
+const publicClient = serverStore;
 
 // Newer stock function (supabase/migrations/20260928190000_value_stock.sql): same job as
 // reserve_stock, plus each chosen value's own quantity. Typed as the old name because the
@@ -287,8 +278,7 @@ async function adminClient(phone: string) {
   const { isAdminPhone } = await import("@/lib/admin.server");
   if (!isAdminPhone(phone)) throw new Error("غير مصرح");
   forgetShopCache();
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  return supabaseAdmin;
+  return serverStore();
 }
 
 // ---------- no limit on rows ----------
@@ -360,7 +350,7 @@ const MENU_COLUMN_SETS = [
 // key missing) just means "no discounts"; it must never take the menu down.
 async function activeDiscountEnds(): Promise<Map<string, string | null>> {
   try {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const supabaseAdmin = await serverStore();
     const { data, error } = await selectAll<{ product_id: string; ends_at: string | null }>(
       (from, to) =>
         supabaseAdmin
@@ -381,7 +371,7 @@ export const getMenu = createServerFn({ method: "GET" })
   .handler(({ data: input }) => remembered("menu", input.fresh, loadMenu));
 
 async function loadMenu(): Promise<MenuItem[]> {
-  const client = publicClient();
+  const client = await publicClient();
   const discountsPromise = activeDiscountEnds();
   for (const columns of MENU_COLUMN_SETS) {
     const { data, error } = await selectAll<unknown>((from, to) =>
@@ -425,7 +415,7 @@ export const checkDiscountCode = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const code = normalizeCode(data.code);
     if (!code || !data.id) return { ok: false as const, reason: "invalid" as const };
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const supabaseAdmin = await serverStore();
     const { data: row } = await supabaseAdmin
       .from("product_discounts")
       .select("code,discount_price,ends_at")
@@ -494,7 +484,7 @@ export const createOrder = createServerFn({ method: "POST" })
       throw new Error("اختر صنفًا واحدًا على الأقل من المنيو");
     }
 
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const supabaseAdmin = await serverStore();
 
     // Everything the customer's browser sent is re-checked against the database here, before
     // the order is saved: chosen options, minimum quantity, discount codes, and the price of
@@ -660,7 +650,7 @@ export const createOrder = createServerFn({ method: "POST" })
       for (const clean of cleanItems) if (clean.id) clean.stock = "pending";
     }
 
-    const payload: Database["public"]["Tables"]["orders"]["Insert"] = {
+    const payload = {
       customer_name: name.slice(0, 120),
       phone: phone.slice(0, 40),
       address: address.slice(0, 300),
@@ -707,7 +697,7 @@ export const getOrderPhotos = createServerFn({ method: "GET" })
     return input;
   })
   .handler(async ({ data }): Promise<OrderPhotos | null> => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const supabaseAdmin = await serverStore();
     const { data: row, error } = await supabaseAdmin
       .from("orders")
       .select("items,total,created_at")
@@ -749,17 +739,24 @@ export const getOrderPhotos = createServerFn({ method: "GET" })
       };
     });
 
-    // WhatsApp only shows a preview for a small enough photo: use the light copy when it exists.
+    // WhatsApp only shows a preview for a small enough photo: use the light copy when it
+    // exists. Its address must be complete (https://…), not just /photos/….
     const first = out.find((i) => i.image_url)?.image_url ?? null;
     let preview = first;
     const name = first ? ownPhotoName(first) : null;
     if (name) {
-      const light = `${photoPrefix()}thumbs/${name}`;
       try {
-        const res = await fetch(light, { method: "HEAD" });
-        if (res.ok) preview = light;
+        if (await hasStoredPhoto(`thumbs/${name}`)) preview = `${PHOTO_PREFIX}thumbs/${name}`;
       } catch {
         // keep the full photo
+      }
+    }
+    if (preview?.startsWith("/")) {
+      try {
+        const { getRequestUrl } = await import("@tanstack/react-start/server");
+        preview = new URL(preview, getRequestUrl()).toString();
+      } catch {
+        // leave it relative
       }
     }
     return {
@@ -868,10 +865,7 @@ async function giveBackStock(
     } else {
       continue; // not counted: nothing was taken
     }
-    const { error } = await db
-      .from("menu_items")
-      .update(update as Database["public"]["Tables"]["menu_items"]["Update"])
-      .eq("id", row.id);
+    const { error } = await db.from("menu_items").update(update).eq("id", row.id);
     if (error) failed.push(row.name);
   }
   return failed;
@@ -904,7 +898,7 @@ export const setOrderDelivered = createServerFn({ method: "POST" })
     const claim = async (status: string, next: OrderItem[], from: string) => {
       const { data: rows, error: claimError } = await db
         .from("orders")
-        .update({ status, items: next as unknown as Json })
+        .update({ status, items: next })
         .eq("id", data.id)
         .eq("status", from)
         .select("id");
@@ -966,6 +960,16 @@ export const setOrderDelivered = createServerFn({ method: "POST" })
       throw new Error("حُذف أحد منتجات هذا الطلب للتو، اضغطي «تأكيد التسليم» مرة أخرى");
     }
     throw new Error(stockError.message);
+  });
+
+// The control panel calls this while it's open: copies the next few photos still in the old
+// Supabase storage into Cloudflare, and says how far it has got (src/lib/photo-move.server.ts).
+export const copyOldPhotos = createServerFn({ method: "POST" })
+  .inputValidator((input: { phone: string }) => input)
+  .handler(async ({ data }) => {
+    await adminClient(data.phone);
+    const { copyOldPhotosBatch } = await import("@/lib/photo-move.server");
+    return copyOldPhotosBatch(4);
   });
 
 // The order form asks this as soon as 10 digits are in the phone field, so the control
@@ -1164,18 +1168,36 @@ export const deleteMenuItem = createServerFn({ method: "POST" })
 // year: a returning customer sees the photos instantly, without downloading them again.
 const PHOTO_CACHE_SECONDS = "31536000";
 
-// Address prefix of the shop's own uploaded photos. Light copies live in its thumbs/ folder,
-// under the same file name (see src/lib/photos.ts).
-function photoPrefix() {
-  return `${process.env["SUPABASE_URL"]!.replace(/\/+$/, "")}/storage/v1/object/public/menu-photos/`;
-}
+// The shop's own photos are served from /photos/<name> (kept in Cloudflare KV; see
+// src/server.ts). Light copies live under /photos/thumbs/<same name> (src/lib/photos.ts).
+const PHOTO_PREFIX = "/photos/";
 
 // File name of one of the shop's own photos, or null for any other address.
 function ownPhotoName(url: string): string | null {
-  const prefix = photoPrefix();
-  if (typeof url !== "string" || !url.startsWith(prefix)) return null;
-  const name = url.slice(prefix.length);
+  if (typeof url !== "string" || !url.startsWith(PHOTO_PREFIX)) return null;
+  const name = url.slice(PHOTO_PREFIX.length);
   return /^[A-Za-z0-9._-]+$/.test(name) ? name : null;
+}
+
+// Whether a photo is in the shop's photo store (without downloading it).
+async function hasStoredPhoto(key: string) {
+  const { rawStore } = await import("@/lib/store.server");
+  const env = await rawStore();
+  const found = await env.PHOTOS.getWithMetadata(key, { type: "stream" });
+  await found.value?.cancel().catch(() => {});
+  return !!found.value;
+}
+
+// One photo's bytes from the shop's photo store, or null when it isn't there.
+async function storedPhoto(key: string) {
+  const { rawStore } = await import("@/lib/store.server");
+  const env = await rawStore();
+  const found = await env.PHOTOS.getWithMetadata<{ contentType?: string }>(key, {
+    type: "stream",
+  });
+  if (!found.value) return null;
+  const bytes = new Uint8Array(await new Response(found.value).arrayBuffer());
+  return { bytes, contentType: found.metadata?.contentType || "image/jpeg" };
 }
 
 export const uploadMenuImage = createServerFn({ method: "POST" })
@@ -1254,15 +1276,15 @@ export const fetchPhotoForThumb = createServerFn({ method: "POST" })
   .inputValidator((input: { phone: string; url: string }) => input)
   .handler(async ({ data }) => {
     await adminClient(data.phone);
-    if (!ownPhotoName(data.url)) throw new Error("ليست من صور المتجر");
-    const res = await fetch(data.url);
-    if (!res.ok) return { ok: false as const, status: res.status };
-    const bytes = Buffer.from(await res.arrayBuffer());
-    if (bytes.byteLength > 8 * 1024 * 1024) return { ok: false as const, status: 413 };
+    const name = ownPhotoName(data.url);
+    if (!name) throw new Error("ليست من صور المتجر");
+    const photo = await storedPhoto(name);
+    if (!photo) return { ok: false as const, status: 404 };
+    if (photo.bytes.byteLength > 8 * 1024 * 1024) return { ok: false as const, status: 413 };
     return {
       ok: true as const,
-      base64: bytes.toString("base64"),
-      contentType: res.headers.get("content-type") || "image/jpeg",
+      base64: Buffer.from(photo.bytes).toString("base64"),
+      contentType: photo.contentType,
     };
   });
 
@@ -1297,7 +1319,7 @@ const SETTINGS_COLUMN_SETS = [
   "story_label,story_title,story_text",
 ];
 
-async function loadSettings(client: ReturnType<typeof publicClient>) {
+async function loadSettings(client: Awaited<ReturnType<typeof publicClient>>) {
   for (const columns of SETTINGS_COLUMN_SETS) {
     const res = await client.from("site_settings").select(columns).eq("id", 1).maybeSingle();
     if (isMissingColumn(res.error)) continue;
@@ -1311,7 +1333,7 @@ export const getStorySection = createServerFn({ method: "GET" })
   .handler(({ data: input }) => remembered("story", input.fresh, loadStorySection));
 
 async function loadStorySection() {
-  const client = publicClient();
+  const client = await publicClient();
   const [settings, promos] = await Promise.all([
     loadSettings(client),
     selectAll<Promotion>((from, to) =>
@@ -1414,7 +1436,7 @@ export const getCategories = createServerFn({ method: "GET" })
   .handler(({ data: input }) => remembered("categories", input.fresh, loadCategories));
 
 async function loadCategories(): Promise<CategoryInfo[]> {
-  const client = publicClient();
+  const client = await publicClient();
   const { data, error } = await selectAll<CategoryInfo>((from, to) =>
     client
       .from("categories")
