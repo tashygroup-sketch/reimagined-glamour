@@ -1,6 +1,6 @@
 # Glamour with Jannat
 
-Online store for makeup and skincare — built on the same stack as [sara-s-sweet-oasis](https://lovable.dev), rebranded for a separate business with its own GitHub repo and Supabase project.
+Online store for makeup and skincare, running entirely on Cloudflare (Workers + D1 + KV).
 
 ## Features
 
@@ -11,23 +11,25 @@ Online store for makeup and skincare — built on the same stack as [sara-s-swee
 
 ## Setup
 
-1. **Install dependencies**
-   ```sh
-   npm i
-   ```
+Everything runs on Cloudflare (no Supabase): the website is a Worker, the shop's data is in a
+**D1 database** and the photos are in a **Workers KV namespace**. Both are on Cloudflare's free
+plan and need no card.
 
-2. **Create a new Supabase project** at [supabase.com](https://supabase.com) (or via Lovable Cloud, if you reconnect this project to Lovable). Do not reuse the sara-s-sweet-oasis project — this store needs its own database.
+1. **Create the two storage spaces** in the Cloudflare dashboard:
+   - Storage & databases → D1 SQL database → Create → name `glamour-db` → copy the Database ID.
+   - Storage & databases → Workers KV → Create → name `glamour-photos` → copy the ID.
+2. **Put the two IDs in `wrangler.json`** (`database_id` and `id`). The tables are created by
+   the site itself the first time it runs; nothing to run by hand.
+3. **Set your own admin code** in `src/lib/admin.server.ts` (`ADMIN_PHONE_DIGITS`) — this is the
+   control panel's password. Typing it in the order form's phone field opens the panel.
+4. **Deploy**: push to GitHub; Cloudflare builds and deploys it (`npm run build`, then
+   `npx wrangler deploy`).
 
-3. **Run the migrations** in `supabase/migrations/` against your new project, in filename order (oldest first) — either with the Supabase CLI (`supabase db push`) or by pasting each file into the SQL Editor in the Supabase dashboard.
-
-4. **Fill in `.env`** with your new project's URL and public (`sb_publishable_...`) key, from Project Settings → API.
-
-5. **Set your own admin code.** Open `src/lib/admin.server.ts` and change `ADMIN_PHONE_DIGITS` to a private 10-digit code only you know — this is effectively your admin password. Change it again if the current value (`6767676767`) is ever shared outside your team.
-
-6. **Run locally**
-   ```sh
-   npm run dev
-   ```
+The first run imports the products, categories, ads and texts from
+`src/lib/seed/glamour-start.json` (exported from the old Supabase project). Their photos are
+copied from the old Supabase storage into Cloudflare automatically (by the control panel while
+it's open, and by the shop the first time a photo is shown). Once the control panel says every
+photo has moved, the old Supabase project can be deleted.
 
 ## WhatsApp order number
 
@@ -35,6 +37,8 @@ Orders are sent as a pre-filled WhatsApp message to the number set in `src/lib/w
 
 ## Deployment
 
-The included `nitro`/Vite build targets Cloudflare Workers by default. Push to a **private** GitHub repository — the `.github/workflows/keep-database-awake.yml` job pings the database every 6 hours to stop a free-tier Supabase project from pausing, and it reads `.env` directly from the repo, which only works safely if the repo isn't public (the admin code also lives in the source).
+The `nitro`/Vite build targets Cloudflare Workers; `wrangler.json` is merged into the generated
+config, which is how the `DB` and `PHOTOS` bindings reach the Worker. Keep the GitHub repository
+**private** — the admin code lives in the source.
 
 This project was originally built with [Lovable](https://lovable.dev).
