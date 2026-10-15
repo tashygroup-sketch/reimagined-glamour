@@ -4,6 +4,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  copyOldPhotos,
   coverImage,
   getMenu,
   getCategories,
@@ -49,6 +50,9 @@ export function MenuPanel({ phone }: { phone: string }) {
   const fetchDiscounts = useServerFn(getDiscountsAdmin);
   const storeThumb = useServerFn(saveThumbnail);
   const photoViaServer = useServerFn(fetchPhotoForThumb);
+  const moveOldPhotos = useServerFn(copyOldPhotos);
+  // photos still being copied from the old Supabase storage into Cloudflare
+  const [move, setMove] = useState<Awaited<ReturnType<typeof copyOldPhotos>> | null>(null);
   const queryClient = useQueryClient();
 
   const [items, setItems] = useState<MenuItem[] | null>(null);
@@ -142,10 +146,36 @@ export function MenuPanel({ phone }: { phone: string }) {
     setJumpTarget(null);
   }, [jumpTarget, shownCount]);
 
-  // While this panel is open: make the light copy of every photo that doesn't have one yet
-  // (photos uploaded before light copies existed), and find photos whose file is gone.
+  // While this panel is open: copy the photos still in the old Supabase storage into
+  // Cloudflare, a few at a time. When Supabase refuses (its monthly limit), try again every
+  // few minutes; the shop also copies each photo by itself the first time it's shown.
   useEffect(() => {
-    if (!items) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    async function step() {
+      try {
+        const p = await moveOldPhotos({ data: { phone } });
+        if (stopped) return;
+        setMove(p);
+        if (p.left > 0) timer = setTimeout(step, p.blocked ? 5 * 60_000 : 0);
+      } catch {
+        if (!stopped) timer = setTimeout(step, 60_000);
+      }
+    }
+    void step();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phone]);
+  const photosMoved = move !== null && move.left === 0;
+
+  // While this panel is open: make the light copy of every photo that doesn't have one yet
+  // (photos uploaded before light copies existed), and find photos whose file is gone. Only
+  // once every photo is in Cloudflare (before that, a photo still in Supabase isn't "gone").
+  useEffect(() => {
+    if (!items || !photosMoved) return;
     const jobs: ThumbJob[] = [];
     for (const c of categoryInfo) {
       if (c.image_url) jobs.push({ url: c.image_url, label: `صورة قسم «${c.name}»` });
@@ -175,7 +205,7 @@ export function MenuPanel({ phone }: { phone: string }) {
       stopped = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, categoryInfo]);
+  }, [items, categoryInfo, photosMoved]);
 
   // The page order: categories as listed, products alphabetical inside each.
   const letters = [...new Set((items ?? []).map((i) => letterOf(i.name)))];
@@ -503,6 +533,32 @@ export function MenuPanel({ phone }: { phone: string }) {
             <LetterPicker letters={letters} onPick={jumpToLetter} />
           )}
         </div>
+      )}
+
+      {/* Photos being copied from the old Supabase storage into Cloudflare. */}
+      {move && move.left > 0 && !move.blocked && (
+        <p role="status" className="rounded-2xl bg-accent px-4 py-3 text-sm text-accent-foreground">
+          جارِ نقل الصور من Supabase إلى Cloudflare: {move.done} من {move.total}. أبقي هذه الصفحة
+          مفتوحة حتى تنتهي.
+        </p>
+      )}
+      {move && move.left > 0 && move.blocked && (
+        <p
+          role="status"
+          className="rounded-2xl border border-primary/40 bg-card px-4 py-3 text-sm text-ink"
+        >
+          {move.reason === "daily-limit"
+            ? `تم نقل ${move.done} من ${move.total} صورة اليوم. Cloudflare يحفظ 1000 صورة في اليوم مجانًا، فيكمل نقل الباقي (${move.left}) غدًا تلقائيًا عند فتح لوحة التحكم.`
+            : `${move.left} صورة ما زالت مقفلة في Supabase (حتى يتجدد حدّه الشهري). ستنتقل وحدها عندما يفتح — تم نقل ${move.done} من ${move.total}. لا تحذفي مشروع Supabase قبل أن تنتقل كلها، ويمكنك رفع أي صورة من جديد الآن.`}
+        </p>
+      )}
+      {move && move.left === 0 && move.missing > 0 && (
+        <p
+          role="status"
+          className="rounded-2xl border border-destructive/40 bg-card px-4 py-3 text-sm text-ink"
+        >
+          {move.missing} صورة لم تكن موجودة في Supabase — ارفعيها من جديد من صفحة المنتج.
+        </p>
       )}
 
       {/* Light copies being made for older photos, and photos whose file is gone. */}
