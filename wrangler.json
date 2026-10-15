@@ -1,0 +1,15 @@
+{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "glamour-db",
+      "database_id": "8d178dbf-388d-431e-bd4e-375051caf3da"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "PHOTOS",
+      "id": "862263a3404948f2931bbd828d978494"
+    }
+  ]
+}
