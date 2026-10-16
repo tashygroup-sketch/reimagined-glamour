@@ -60,12 +60,64 @@ async function insertAll(
       ? `COALESCE(json_extract(value, '$.${c}'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`
       : `json_extract(value, '$.${c}')`,
   );
-  await db
-    .prepare(
-      `INSERT OR IGNORE INTO ${table} (${cols.join(", ")}) SELECT ${picks.join(", ")} FROM json_each(?)`,
-    )
-    .bind(JSON.stringify(rows))
-    .run();
+  const sql = `INSERT OR IGNORE INTO ${table} (${cols.join(", ")}) SELECT ${picks.join(", ")} FROM json_each(?)`;
+  // In pieces of at most ~300 KB, well under the database's 2 MB limit for one value.
+  let piece: string[] = [];
+  let size = 0;
+  const flush = async () => {
+    if (piece.length === 0) return;
+    await db.prepare(sql).bind(`[${piece.join(",")}]`).run();
+    piece = [];
+    size = 0;
+  };
+  for (const row of rows) {
+    const text = JSON.stringify(row);
+    if (size + text.length > 300_000) await flush();
+    piece.push(text);
+    size += text.length + 1;
+  }
+  await flush();
+}
+
+const ORDER_COLUMNS = [
+  "id",
+  "customer_name",
+  "phone",
+  "address",
+  "delivery_date",
+  "notes",
+  "location_url",
+  "items",
+  "total",
+  "status",
+  "created_at",
+] as const;
+
+type OldOrders = { orders?: Record<string, unknown>[]; discounts?: Record<string, unknown>[] };
+
+// src/lib/seed/glamour-orders.json was made from Supabase's orders export. Orders keep their
+// ids, status and the stock marks on their lines, so «تم التسليم» and its undo work on them
+// exactly as before (nothing is taken twice). It holds customers' names and phones, so once
+// the orders show in the control panel the file can be deleted from GitHub: the website
+// still builds without it (that's why it's looked up with import.meta.glob).
+// Returns false when the file isn't there, so nothing is marked as done.
+const oldOrdersFile = import.meta.glob<OldOrders>("./seed/glamour-orders.json", {
+  import: "default",
+});
+
+export async function importOldOrders(db: D1Like): Promise<boolean> {
+  const load = Object.values(oldOrdersFile)[0];
+  if (!load) return false;
+  const data = await load();
+  await insertAll(db, "orders", ORDER_COLUMNS, data.orders);
+  await insertAll(
+    db,
+    "product_discounts",
+    ["product_id", "code", "discount_price", "ends_at"],
+    data.discounts,
+    true,
+  );
+  return true;
 }
 
 export async function importStartingData(db: D1Like) {

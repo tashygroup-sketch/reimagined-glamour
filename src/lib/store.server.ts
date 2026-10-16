@@ -183,17 +183,27 @@ let schemaReady = false;
 async function ensureSchema(db: D1Database) {
   if (schemaReady) return;
   await db.batch(SCHEMA.map((sql) => db.prepare(sql)));
-  const seeded = await db
-    .prepare("SELECT value FROM shop_meta WHERE key = 'products_imported'")
-    .first<{ value: string }>();
-  if (!seeded) {
+  const flags = await db
+    .prepare("SELECT key FROM shop_meta WHERE key IN ('products_imported', 'orders_imported')")
+    .all<{ key: string }>();
+  const done = new Set((flags.results ?? []).map((r) => r.key));
+  const markDone = (key: string) =>
+    db
+      .prepare(
+        "INSERT OR REPLACE INTO shop_meta (key, value) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+      )
+      .bind(key)
+      .run();
+  if (!done.has("products_imported")) {
     const { importStartingData } = await import("@/lib/store-import.server");
     await importStartingData(db);
-    await db
-      .prepare(
-        "INSERT OR REPLACE INTO shop_meta (key, value) VALUES ('products_imported', strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-      )
-      .run();
+    await markDone("products_imported");
+  }
+  // The orders and discount codes from Supabase came in a second step, after the shop was
+  // already running here: added once, next to anything placed here since (never replacing it).
+  if (!done.has("orders_imported")) {
+    const { importOldOrders } = await import("@/lib/store-import.server");
+    if (await importOldOrders(db)) await markDone("orders_imported");
   }
   schemaReady = true;
 }
